@@ -17,13 +17,26 @@ Cach hoat dong (da reverse-engineer, khac han Agoda vi Booking.com co AWS WAF JS
   3. Chi tiet 1 khach san: GET /hotel/<country>/<slug>.html -> cung ky thuat tach Apollo
      cache -> BasicPropertyData, PropertyReview, RoomData, RatingScore (category_scores
      nam o ROOT_QUERY.reviewsFrontend(...).ratingScores[]), starRating (o
-     ROOT_QUERY.hotelPageByPageName(...).propertyFullExtended), anh (Property.
-     propertyGallery(...).mainGalleryPhotos[] -> AccommodationPhoto), amenities (Property.
-     highlights(...).entities[] -> BaseFacility -> Instance.title).
+     ROOT_QUERY.hotelPageByPageName(...).propertyFullExtended, la 1 REF toi StarRating.value),
+     anh (Property.propertyGallery(...).mainGalleryPhotos[] -> AccommodationPhoto), khu vuc
+     (ROOT_QUERY.breadcrumbs(...).breadcrumbItems[] loc type=="district"), gio nhan/tra phong
+     (Property.houseRules.checkinCheckoutTimes).
      GIOI HAN DA BIET: RoomTableQueryResult.roomCards (bang gia tren trang chi tiet) LUON
      RONG du da truyen du checkin/checkout/group_adults/no_rooms - vi vay gia phong LAY TU
      BUOC TIM KIEM (xem muc 2), khong phai tu trang chi tiet. Neu 1 khach san duoc fetch
      truc tiep qua propertyUrls/hotelIds (khong qua buoc tim kiem), se KHONG co gia.
+  4. 2 loi goi bo sung (khong nam trong SSR cache chinh, phai goi rieng qua POST
+     /dml/graphql - xem src/property_extras_query.py va fetch_surroundings/
+     fetch_facilities):
+     a. PropertySurroundingsBlockDesktop -> nearby_attractions (landmarks.top[]),
+        nearby_essentials (airports[] + publicTransport.train/metro/bus[]). Goi voi
+        query text day du (khong dung Automatic Persisted Query).
+     b. Facilities -> amenities (day du, khong chi tap nho tu highlights) + amenity_groups
+        (facilities[] noi voi facilityGroups[] qua groupId). Goi bang Automatic Persisted
+        Query (APQ): chi gui sha256Hash, KHONG can gui query text (server da cache san
+        theo hash, dung chung cho moi client).
+     Neu 1 trong 2 loi goi nay that bai, khong lam hong ca record - chi bo trong
+     truong tuong ung + canh bao trong warnings.
 """
 
 from __future__ import annotations
@@ -38,9 +51,16 @@ import httpx
 from playwright.async_api import async_playwright
 
 from .cache_parser import extract_apollo_cache, find_all, find_first, resolve_list, resolve_ref
+from .property_extras_query import (
+    FACILITIES_SHA256_HASH,
+    SURROUNDINGS_QUERY,
+    default_facilities_variables,
+    default_surroundings_variables,
+)
 
 BASE = "https://www.booking.com"
 SEARCH_URL = f"{BASE}/searchresults.html"
+GRAPHQL_URL = f"{BASE}/dml/graphql"
 CDN_BASE = "https://cf.bstatic.com"
 
 # Dau hieu nhan biet trang van con bi AWS WAF JS-challenge chan (chua co cookie hop le).
@@ -123,6 +143,69 @@ class BookingClient:
             await self.bootstrap()
             resp = await self._client.get(url, params=params)
         return resp
+
+    async def _post_graphql(self, body: dict[str, Any]) -> dict[str, Any]:
+        """POST toi /dml/graphql, tra ve phan "data" cua response. Raise BookingError
+        neu HTTP loi, van con WAF challenge, hoac GraphQL tra ve errors."""
+        if not self._bootstrapped:
+            await self.bootstrap()
+        # Cac GraphQL POST nay (surroundings/facilities) doc ngon ngu tu header
+        # Accept-Language (khac GET request thuong dung param URL "lang=") - da xac
+        # nhan qua Playwright network capture: request that gui "accept-language: vi-VN"
+        # chu khong phai "en-US,en;q=0.9" mac dinh cua client.
+        headers = {
+            "Content-Type": "application/json",
+            "Referer": f"{BASE}/",
+            "Accept-Language": _accept_language_for(self.language),
+        }
+        resp = await self._client.post(GRAPHQL_URL, json=body, headers=headers)
+        if _looks_like_challenge(resp):
+            await self.bootstrap()
+            resp = await self._client.post(GRAPHQL_URL, json=body, headers=headers)
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("errors"):
+            raise BookingError(f"GraphQL {body.get('operationName')} loi: {data['errors'][:1]}")
+        return data.get("data") or {}
+
+    async def fetch_surroundings(self, hotel_id: int, hotel_ufi: int) -> dict[str, Any]:
+        """Goi PropertySurroundingsBlockDesktop -> dict "propertySurroundings" tho
+        (landmarks, airports, publicTransport...) - xem _extract_nearby_*."""
+        variables = default_surroundings_variables()
+        variables["input"]["hotelId"] = hotel_id
+        variables["input"]["hotelUfi"] = hotel_ufi
+        variables["endorsementGroupsInput"]["hotelId"] = hotel_id
+        body = {"operationName": "PropertySurroundingsBlockDesktop", "variables": variables, "query": SURROUNDINGS_QUERY}
+        try:
+            data = await self._post_graphql(body)
+        except Exception as exc:  # noqa: BLE001
+            raise BookingError(f"Lay du lieu lan can that bai cho hotelId={hotel_id}: {exc}") from exc
+        return data.get("propertySurroundings") or {}
+
+    async def fetch_facilities(
+        self,
+        country_code: str,
+        page_name: str,
+        adults: int = 2,
+        rooms: int = 1,
+    ) -> dict[str, Any]:
+        """Goi Facilities (Automatic Persisted Query - chi gui hash) -> dict
+        "propertyDetails" tho (facilities[] + facilityGroups[]) - xem _extract_amenity_data.
+        """
+        variables = default_facilities_variables()
+        variables["input"]["pageNameDetails"] = {"countryCode": country_code, "pagename": page_name}
+        variables["input"]["searchConfig"]["nbAdults"] = adults
+        variables["input"]["searchConfig"]["nbRooms"] = rooms
+        body = {
+            "operationName": "Facilities",
+            "variables": variables,
+            "extensions": {"persistedQuery": {"version": 1, "sha256Hash": FACILITIES_SHA256_HASH}},
+        }
+        try:
+            data = await self._post_graphql(body)
+        except Exception as exc:  # noqa: BLE001
+            raise BookingError(f"Lay du lieu tien nghi that bai cho '{page_name}': {exc}") from exc
+        return ((data.get("hotelPageByPageName") or {}).get("propertyDetails")) or {}
 
     # --- 1) Tim kiem (dung chung cho ten khach san va vung/thanh pho) --------
     async def search(
@@ -239,11 +322,61 @@ class BookingClient:
         if not cache:
             raise BookingError(f"Khong tach duoc du lieu khach san tu {property_url} (co the van bi WAF chan)")
 
-        record = _map_hotel(cache, property_url, search_criteria)
+        basic = find_first(cache, "BasicPropertyData") or {}
+        hotel_id = basic.get("id")
+        hotel_ufi = basic.get("ufi")
+        country_code = ((basic.get("location") or {}).get("countryCode")) or ""
+        page_name = basic.get("pageName")
+
+        # 2 loi goi bo sung (surroundings/facilities) - loi o day KHONG lam hong ca
+        # record, chi de trong + ghi warning (xem docstring dau file).
+        surroundings: dict[str, Any] = {}
+        facilities_data: dict[str, Any] = {}
+        extra_warnings: list[str] = []
+        if hotel_id and hotel_ufi is not None:
+            try:
+                surroundings = await self.fetch_surroundings(hotel_id, hotel_ufi)
+            except BookingError:
+                extra_warnings.append("surroundings_unavailable")
+        else:
+            extra_warnings.append("surroundings_unavailable")
+        if country_code and page_name:
+            try:
+                facilities_data = await self.fetch_facilities(
+                    country_code,
+                    page_name,
+                    adults=search_criteria.get("adults", 2) if search_criteria else 2,
+                    rooms=search_criteria.get("rooms", 1) if search_criteria else 1,
+                )
+            except BookingError:
+                extra_warnings.append("facilities_unavailable")
+        else:
+            extra_warnings.append("facilities_unavailable")
+
+        record = _map_hotel(cache, property_url, search_criteria, surroundings, facilities_data)
+        record["warnings"].extend(extra_warnings)
         if price_hint:
             record["price"] = price_hint.get("price")
             record["currency"] = price_hint.get("currency")
+        _normalize_vnd(record)
         return record
+
+
+# Map input `language` (dung cho param URL "lang=") -> ma Accept-Language day du can
+# cho cac GraphQL POST (surroundings/facilities) - xem _post_graphql().
+_ACCEPT_LANGUAGE_MAP = {
+    "en-us": "en-US,en;q=0.9",
+    "vi": "vi-VN,vi;q=0.9",
+    "th": "th-TH,th;q=0.9",
+    "ko": "ko-KR,ko;q=0.9",
+    "ja": "ja-JP,ja;q=0.9",
+    "zh-cn": "zh-CN,zh;q=0.9",
+    "id": "id-ID,id;q=0.9",
+}
+
+
+def _accept_language_for(language: str) -> str:
+    return _ACCEPT_LANGUAGE_MAP.get(language, "en-US,en;q=0.9")
 
 
 def _looks_like_challenge(resp: httpx.Response) -> bool:
@@ -465,18 +598,87 @@ def _extract_star_rating(cache: dict[str, Any]) -> float | None:
     return _coerce_float(star_rating.get("value"))
 
 
-def _extract_amenities(cache: dict[str, Any]) -> list[str]:
-    """Tien nghi noi bat cua khach san, tu Property.highlights(...).entities[] (BaseFacility
-    -> Instance.title). Day la 1 tap NHO cac tien nghi noi bat (KHONG phai danh sach day du
-    nhu Agoda - Booking khong lo ra 1 danh sach tien nghi day du + nhom ro rang qua cache).
+def _extract_amenity_data(facilities_data: dict[str, Any]) -> tuple[list[str], dict[str, list[str]]]:
+    """Tien nghi day du (phang + theo nhom), tu ket qua fetch_facilities():
+    propertyDetails.facilities[] (BaseFacility, co groupId + instances[0].title) noi
+    voi propertyDetails.facilityGroups[] (FacilityGroup: id -> title) qua groupId.
+    """
+    group_names = {g.get("id"): g.get("title") for g in facilities_data.get("facilityGroups") or []}
+
+    flat: list[str] = []
+    grouped: dict[str, list[str]] = {}
+    for fac in facilities_data.get("facilities") or []:
+        instances = fac.get("instances") or []
+        name = instances[0].get("title") if instances and isinstance(instances[0], dict) else None
+        if not name:
+            continue
+        flat.append(name)
+        group_name = group_names.get(fac.get("groupId")) or "Khac"
+        grouped.setdefault(group_name, []).append(name)
+    return flat, grouped
+
+
+def _extract_area_name(cache: dict[str, Any]) -> str | None:
+    """Ten khu vuc/quan, tu ROOT_QUERY.breadcrumbs(...).breadcrumbItems[] loc
+    type=="district". Chi lay `name` (KHONG lay url - co chua session/tracking token)."""
+    root = cache.get("ROOT_QUERY") or {}
+    key = next((k for k in root if k.startswith("breadcrumbs(")), None)
+    if not key:
+        return None
+    items = (root.get(key) or {}).get("breadcrumbItems") or []
+    for item in items:
+        if item.get("type") == "district":
+            return item.get("name")
+    return None
+
+
+def _extract_checkin_checkout_times(cache: dict[str, Any]) -> dict[str, str | None]:
+    """Gio nhan/tra phong that, tu Property.houseRules.checkinCheckoutTimes:
+    checkinTimeRange.fromFormatted (nhan phong tu), .untilFormatted (nhan phong den -
+    khong phai khach san nao cung co), checkoutTimeRange.untilFormatted (tra phong den).
     """
     property_ = find_first(cache, "Property") or {}
-    hl_key = next((k for k in property_ if k.startswith("highlights(")), None)
-    if not hl_key:
-        return []
-    entities = (property_.get(hl_key) or {}).get("entities") or []
-    names = [name for ref in entities if (name := _resolve_facility_name(cache, ref))]
-    return names
+    times = ((property_.get("houseRules") or {}).get("checkinCheckoutTimes")) or {}
+    checkin_range = times.get("checkinTimeRange") or {}
+    checkout_range = times.get("checkoutTimeRange") or {}
+    return {
+        "check_in_time": checkin_range.get("fromFormatted"),
+        "check_in_until": checkin_range.get("untilFormatted"),
+        "check_out_time": checkout_range.get("untilFormatted"),
+    }
+
+
+def _extract_nearby_attractions(surroundings: dict[str, Any]) -> list[str]:
+    """Diem tham quan gan, tu propertySurroundings.landmarks.top[] (name + distanceLocalized)."""
+    landmarks = (surroundings.get("landmarks") or {}).get("top") or []
+    return [f"{lm['name']} - {lm['distanceLocalized']}" for lm in landmarks if lm.get("name")]
+
+
+def _extract_nearby_essentials(surroundings: dict[str, Any]) -> list[dict[str, Any]]:
+    """San bay/giao thong gan, tu propertySurroundings.airports[] +
+    .publicTransport.{train,metro,bus}[]."""
+    out: list[dict[str, Any]] = []
+    for a in surroundings.get("airports") or []:
+        out.append(
+            {
+                "category": "Airports",
+                "name": a.get("name"),
+                "distance_km": _coerce_float(a.get("distance")),
+                "distance_text": a.get("distanceLocalized"),
+            }
+        )
+    public_transport = surroundings.get("publicTransport") or {}
+    for key in ("train", "metro", "bus"):
+        for item in public_transport.get(key) or []:
+            out.append(
+                {
+                    "category": "Public transportation",
+                    "name": item.get("name"),
+                    "distance_km": _coerce_float(item.get("distance")),
+                    "distance_text": item.get("distanceLocalized"),
+                }
+            )
+    return out
 
 
 def _extract_images(cache: dict[str, Any]) -> list[str]:
@@ -505,9 +707,13 @@ def _map_hotel(
     cache: dict[str, Any],
     property_url: str,
     search_criteria: dict[str, Any] | None,
+    surroundings: dict[str, Any] | None = None,
+    facilities_data: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Map Apollo cache -> record chuan."""
+    """Map Apollo cache (+ surroundings/facilities bo sung neu co) -> record chuan."""
     warnings: list[str] = []
+    surroundings = surroundings or {}
+    facilities_data = facilities_data or {}
 
     basic = find_first(cache, "BasicPropertyData") or {}
     location = basic.get("location") or {}
@@ -521,6 +727,8 @@ def _map_hotel(
 
     rooms = _extract_rooms(cache)
     images = _extract_images(cache)
+    amenities, amenity_groups = _extract_amenity_data(facilities_data)
+    checkin_checkout = _extract_checkin_checkout_times(cache)
 
     record: dict[str, Any] = {
         "hotel_id": hotel_id,
@@ -529,11 +737,15 @@ def _map_hotel(
         "star_rating": _extract_star_rating(cache),
         "address": location.get("formattedAddress"),
         "city": location.get("city"),
+        "area_name": _extract_area_name(cache),
         "country": location.get("countryCode"),
         "review_score": _coerce_float(total_score.get("score")),
         "review_count": _coerce_int(total_score.get("reviewsCount")),
         "category_scores": extract_category_scores(cache),
-        "amenities": _extract_amenities(cache),
+        "amenities": amenities,
+        "amenity_groups": amenity_groups,
+        "nearby_attractions": _extract_nearby_attractions(surroundings),
+        "nearby_essentials": _extract_nearby_essentials(surroundings),
         # Truong gia: mac dinh None, se duoc fetch_hotel() ghi de bang price_hint neu co
         # (gia THAT lay tu buoc tim kiem - xem docstring dau file).
         "price": None,
@@ -541,6 +753,9 @@ def _map_hotel(
         "rooms_available": None,
         "check_in": search_criteria.get("check_in") if search_criteria else None,
         "check_out": search_criteria.get("check_out") if search_criteria else None,
+        "check_in_time": checkin_checkout["check_in_time"],
+        "check_in_until": checkin_checkout["check_in_until"],
+        "check_out_time": checkin_checkout["check_out_time"],
         "room_types": [r["name"] for r in rooms if r.get("name")],
         "rooms": rooms,
         "image_url": images[0] if images else None,
@@ -557,6 +772,16 @@ def _map_hotel(
         warnings.append("missing_geo")
     record["warnings"] = warnings
     return record
+
+
+# Booking.com hien thi VND khong co phan thap phan (khong dung sen/xu) - lam tron
+# gia ve so nguyen khi tien te la VND de tranh cac gia tri le nhu "6804000.0001".
+def _normalize_vnd(record: dict[str, Any]) -> None:
+    if record.get("currency") == "VND" and record.get("price") is not None:
+        record["price"] = round(record["price"])
+    for room in record.get("rooms") or []:
+        if room.get("currency") == "VND" and room.get("price_per_night") is not None:
+            room["price_per_night"] = round(room["price_per_night"])
 
 
 def _format_coordinates(lat: Any, lng: Any) -> str | None:

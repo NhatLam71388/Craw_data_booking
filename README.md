@@ -143,18 +143,21 @@ base image `apify/actor-python-playwright` (đã có sẵn Playwright + trình d
 | `hotel_id` / `hotel_name` | Định danh & tên |
 | `accommodation_type` | Loại hình (vd `HOTEL`) |
 | `star_rating` | Hạng sao chính thức (thường `null` với homestay/căn hộ nhỏ — Booking.com không bắt buộc khai báo) |
-| `address` / `city` / `country` | Vị trí (`country` là mã 2 chữ, vd `vn`) |
+| `address` / `city` / `area_name` / `country` | Vị trí (`area_name` là tên quận/khu vực, vd `"Quận 1"` — `null` nếu khách sạn ở ngoài khu vực có breadcrumb quận; `country` là mã 2 chữ, vd `vn`) |
 | `review_score` / `review_count` | Điểm & số lượng review tổng |
 | `category_scores` | Điểm theo hạng mục — **nhãn đã dịch theo `language`** (vd `{"Nhân viên phục vụ": 9.4, "Địa điểm": 9.5, ...}`), lấy trực tiếp từ Booking.com nên đúng cho mọi ngôn ngữ |
-| `amenities` | Tiện nghi nổi bật (danh sách nhỏ — Booking.com không lộ ra 1 danh sách tiện nghi đầy đủ + nhóm rõ ràng như Agoda) |
-| `price` / `currency` / `rooms_available` | Giá tổng hợp rẻ nhất/đêm — **chỉ có khi tìm qua `searchTerms`/`locations` kèm `checkIn`**, `null` nếu dùng `propertyUrls`/`hotelIds` hoặc không cấp `checkIn` (xem "Giới hạn đã biết") |
+| `amenities` / `amenity_groups` | Tiện nghi đầy đủ (phẳng & theo nhóm, vd `{"Phòng tắm": [...], "Đồ ăn & thức uống": [...]}`) — nhãn đã dịch theo `language` |
+| `nearby_attractions` | Điểm tham quan gần (vd `"Hầm Thủ Thiêm - 650 m"`) |
+| `nearby_essentials` | Sân bay/giao thông công cộng gần: `category`, `name`, `distance_km`, `distance_text` |
+| `price` / `currency` / `rooms_available` | Giá tổng hợp rẻ nhất/đêm — **chỉ có khi tìm qua `searchTerms`/`locations` kèm `checkIn`**, `null` nếu dùng `propertyUrls`/`hotelIds` hoặc không cấp `checkIn` (xem "Giới hạn đã biết"). Giá VND được làm tròn số nguyên (không thập phân). |
 | `check_in` / `check_out` | Ngày dùng để tính giá (nếu có cấp `checkIn`), `null` nếu không |
+| `check_in_time` / `check_in_until` / `check_out_time` | Giờ nhận phòng từ / nhận phòng đến (muộn nhất, thường `null` — không phải khách sạn nào cũng giới hạn) / trả phòng đến (vd `15:00` / `null` / `12:00`) |
 | `room_types` | Danh sách tên loại phòng |
 | `rooms` | Chi tiết từng phòng: `name`, `room_id`, `amenities` (tiện nghi phòng), `image_count`, `images` (toàn bộ ảnh phòng), `price_per_night`/`currency`/`sold_out` (hiện luôn `null` — xem "Giới hạn đã biết") |
 | `image_url` / `image_count` / `all_images` | Ảnh khách sạn (toàn bộ thư viện ảnh) |
 | `coordinates` | Toạ độ dạng chuỗi `"lat,lng"` — dán thẳng được vào Google Maps |
 | `property_url` | URL trang khách sạn |
-| `warnings` | Cảnh báo parse (rỗng nếu bình thường) |
+| `warnings` | Cảnh báo parse: `missing_name`/`missing_geo`/`surroundings_unavailable`/`facilities_unavailable` (rỗng nếu bình thường) |
 | `scraped_at` | Thời điểm crawl (ISO-8601 UTC) |
 
 ---
@@ -174,10 +177,25 @@ base image `apify/actor-python-playwright` (đã có sẵn Playwright + trình d
 3. **Chi tiết khách sạn** — `GET /hotel/<cc>/<slug>.html` → cùng kỹ thuật tách Apollo cache →
    `BasicPropertyData` (tên, địa chỉ, tọa độ), `PropertyReview` (điểm tổng),
    `ROOT_QUERY.reviewsFrontend(...).ratingScores[]` (điểm theo hạng mục, đã dịch sẵn),
-   `ROOT_QUERY.hotelPageByPageName(...).propertyFullExtended.starRating` (hạng sao),
-   `Property.propertyGallery(...).mainGalleryPhotos[]` (ảnh), `Property.highlights(...)` (tiện
-   nghi nổi bật), `RoomData` (phòng: tên, tiện nghi qua `BaseFacility`→`Instance`, ảnh qua
-   `RoomPhoto`). Trang này **không có giá** (xem "Giới hạn đã biết").
+   `ROOT_QUERY.hotelPageByPageName(...).propertyFullExtended.starRating` (hạng sao, là 1
+   tham chiếu tới `StarRating.value`), `Property.propertyGallery(...).mainGalleryPhotos[]`
+   (ảnh), `ROOT_QUERY.breadcrumbs(...).breadcrumbItems[]` lọc `type=="district"` (khu vực),
+   `Property.houseRules.checkinCheckoutTimes` (giờ nhận/trả phòng), `RoomData` (phòng: tên,
+   tiện nghi qua `BaseFacility`→`Instance`, ảnh qua `RoomPhoto`). Trang này **không có giá**
+   (xem "Giới hạn đã biết").
+4. **2 lời gọi bổ sung** (không nằm trong cache SSR chính, phải gọi riêng qua
+   `POST /dml/graphql`, xem `src/property_extras_query.py`):
+   - `PropertySurroundingsBlockDesktop` → `nearby_attractions`/`nearby_essentials`. Gửi
+     kèm **query text đầy đủ** đã bắt được qua Playwright network capture.
+   - `Facilities` → `amenities`/`amenity_groups` đầy đủ (nối `facilities[]` với
+     `facilityGroups[]` qua `groupId`). Dùng **Automatic Persisted Query (APQ)**: chỉ cần
+     gửi `sha256Hash`, không cần gửi query text — server đã cache sẵn theo hash, dùng
+     chung cho mọi client (không phụ thuộc session).
+   - Cả 2 lời gọi đọc ngôn ngữ qua header `Accept-Language` (khác GET request thường dùng
+     param `lang=` trên URL) — actor tự map `language` sang locale tương ứng (vd `vi` →
+     `vi-VN,vi;q=0.9`).
+   - Nếu 1 trong 2 lời gọi này thất bại, record vẫn được lưu bình thường (chỉ để trống
+     trường tương ứng + thêm cảnh báo vào `warnings`).
 
 > Booking.com không công bố API nên schema có thể đổi theo thời gian. Nếu kết quả rỗng/lỗi, mở
 > DevTools > Network trên 1 trang search hoặc chi tiết khách sạn, tìm thẻ
