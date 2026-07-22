@@ -21,10 +21,20 @@ Cach hoat dong (da reverse-engineer, khac han Agoda vi Booking.com co AWS WAF JS
      anh (Property.propertyGallery(...).mainGalleryPhotos[] -> AccommodationPhoto), khu vuc
      (ROOT_QUERY.breadcrumbs(...).breadcrumbItems[] loc type=="district"), gio nhan/tra phong
      (Property.houseRules.checkinCheckoutTimes).
+     Phong (rooms[]) gop 2 nguon theo CUNG 1 id: `RoomData` (ten, anh, tien nghi/view qua
+     BaseFacility->Instance) va `RoomDetails` (roomSizeM2, bedConfigurations, occupancy) -
+     ca 2 la entity "mo coi" trong cache (KHONG co gi tham chieu (__ref) toi chung, vi
+     RoomTableQueryResult.roomCards - noi le ra se link chung - lai rong) nhung van dung
+     duoc truc tiep vi Apollo van normalize chung vao cache theo id. "view" duoc loc tu
+     RoomData.amenities co groupId==14 (nhom "View" trong facilityGroups).
      GIOI HAN DA BIET: RoomTableQueryResult.roomCards (bang gia tren trang chi tiet) LUON
-     RONG du da truyen du checkin/checkout/group_adults/no_rooms - vi vay gia phong LAY TU
-     BUOC TIM KIEM (xem muc 2), khong phai tu trang chi tiet. Neu 1 khach san duoc fetch
-     truc tiep qua propertyUrls/hotelIds (khong qua buoc tim kiem), se KHONG co gia.
+     RONG du da truyen du checkin/checkout/group_adults/no_rooms - vi vay gia phong HOTEL
+     lay tu BUOC TIM KIEM (xem muc 2), khong phai tu trang chi tiet; gia/tinh trang CON
+     PHONG RIENG TUNG LOAI (rooms[].price_per_night/currency/sold_out) van CHUA co nguon.
+     rooms[].review_score/review_text cung KHONG co (da xac nhan qua HOTEL_ROOM_SCHEMA.md:
+     day la field CHI Agoda co, dataset Booking that khong co tuong duong). Neu 1 khach
+     san duoc fetch truc tiep qua propertyUrls/hotelIds (khong qua buoc tim kiem), gia
+     cap khach san (price/currency) cung se KHONG co.
   4. 2 loi goi bo sung (khong nam trong SSR cache chinh, phai goi rieng qua POST
      /dml/graphql - xem src/property_extras_query.py va fetch_surroundings/
      fetch_facilities):
@@ -312,15 +322,37 @@ class BookingClient:
                 }
             )
 
-        try:
-            resp = await self._get(property_url, params=params)
-            resp.raise_for_status()
-        except Exception as exc:  # noqa: BLE001
-            raise BookingError(f"Khong lay duoc khach san tu {property_url}: {exc}") from exc
+        # Da xac nhan qua test: RoomDetails (bed/size/occupancy) thinh thoang vang mat -
+        # va day la bien the GAN VOI PHIEN/COOKIE (~1/4 phien bi thieu, nhung cung 1 phien
+        # thi luon nhat quan - thu lai voi CUNG cookie khong giup gi). Cach hieu qua la
+        # BOOTSTRAP LAI (cookie moi) giua cac lan thu de "roll" sang bien the khac. Toi da
+        # 3 lan, tu lan 2 tro di bootstrap lai truoc khi thu.
+        cache: dict[str, Any] = {}
+        for attempt in range(3):
+            if attempt > 0:
+                await self.bootstrap()
+            try:
+                resp = await self._get(property_url, params=params)
+                resp.raise_for_status()
+            except Exception as exc:  # noqa: BLE001
+                if attempt == 2:
+                    raise BookingError(f"Khong lay duoc khach san tu {property_url}: {exc}") from exc
+                continue
 
-        cache = extract_apollo_cache(resp.text)
-        if not cache:
-            raise BookingError(f"Khong tach duoc du lieu khach san tu {property_url} (co the van bi WAF chan)")
+            cache = extract_apollo_cache(resp.text)
+            if not cache:
+                if attempt == 2:
+                    raise BookingError(
+                        f"Khong tach duoc du lieu khach san tu {property_url} (co the van bi WAF chan)"
+                    )
+                continue
+
+            has_rooms = bool(find_all(cache, "RoomData"))
+            has_room_details = bool(find_all(cache, "RoomDetails"))
+            if not has_rooms or has_room_details:
+                break
+            # co RoomData nhung thieu RoomDetails -> thu lai voi cookie moi (tru lan cuoi,
+            # van dung tam ket qua nay - bed/size/max_occupancy se la None, khong fatal).
 
         basic = find_first(cache, "BasicPropertyData") or {}
         hotel_id = basic.get("id")
@@ -540,31 +572,79 @@ def _resolve_facility_name(cache: dict[str, Any], facility_ref: Any) -> str | No
     return None
 
 
+# groupId cua nhom "View" trong facilityGroups (xac nhan qua fetch_facilities) - dung de
+# tach "view" ra khoi danh sach tien nghi chung cua phong (RoomData.amenities).
+_VIEW_GROUP_ID = 14
+
+# Booking khong tra ten loai giuong da dich (khac view/amenities lay tu Instance.title da
+# dich san) - bedType la 1 hang so ENUM tho (vd "EXTRA_LARGE_DOUBLE_BED"), nen "bed" luon
+# hien thi tieng Anh don gian bat ke `language`, khac voi cac truong khac cua actor.
+def _format_bed_type(bed_type: str) -> str:
+    return bed_type.replace("_", " ").strip().capitalize()
+
+
+def _format_bed_configurations(bed_configs: list[dict[str, Any]] | None) -> str | None:
+    parts: list[str] = []
+    for cfg in bed_configs or []:
+        for bed in cfg.get("beds") or []:
+            bed_type = bed.get("bedType")
+            if not bed_type:
+                continue
+            count = bed.get("count") or 1
+            parts.append(f"{count} {_format_bed_type(bed_type)}")
+    return ", ".join(parts) if parts else None
+
+
 def _extract_rooms(cache: dict[str, Any]) -> list[dict[str, Any]]:
-    """Danh sach phong co ban (ten, tien nghi, anh) tu RoomData - KHONG co gia (xem
-    gioi han o dau file: RoomTableQueryResult.roomCards luon rong trong lan kiem tra).
+    """Danh sach phong, gop 2 nguon theo CUNG 1 id (xem docstring dau file):
+    RoomData (ten, anh, tien nghi/view) + RoomDetails (size, giuong, so nguoi toi da).
+
+    CHUA co: price_per_night/currency/sold_out (gia/tinh trang rieng tung phong) va
+    review_score/review_text (Booking khong co field tuong duong - xem docstring dau file).
     """
+    details_by_id = {rd.get("id"): rd for rd in find_all(cache, "RoomDetails")}
+
     rooms: list[dict[str, Any]] = []
     for room in find_all(cache, "RoomData"):
+        room_id = room.get("id")
         translations = room.get("translations") or {}
-        amenities = [
-            name
-            for ref in room.get("amenities") or []
-            if (name := _resolve_facility_name(cache, ref))
-        ]
+
+        amenities: list[str] = []
+        views: list[str] = []
+        for ref in room.get("amenities") or []:
+            facility = resolve_ref(cache, ref)
+            if not isinstance(facility, dict):
+                continue
+            name = _resolve_facility_name(cache, ref)
+            if not name:
+                continue
+            (views if facility.get("groupId") == _VIEW_GROUP_ID else amenities).append(name)
+
         photos = resolve_list(cache, room.get("roomPhotos"))
         images = [_abs_image_url(p.get("photoUri")) for p in photos if isinstance(p, dict) and p.get("photoUri")]
+
+        details = details_by_id.get(room_id) or {}
+        size_m2 = details.get("roomSizeM2")
+        occupancy = details.get("occupancy") or {}
+        max_guests = occupancy.get("maxGuests") or occupancy.get("maxPersons")
+
         rooms.append(
             {
                 "name": translations.get("name"),
-                "room_id": room.get("id"),
+                "room_id": room_id,
+                "bed": _format_bed_configurations(details.get("bedConfigurations")),
+                "size": f"{size_m2} m²" if size_m2 else None,
+                "max_occupancy": str(max_guests) if max_guests else None,
+                "view": ", ".join(views) if views else None,
                 "amenities": amenities,
                 "image_count": len(images),
                 "images": images,
-                # Chua xac nhan duoc gia/tinh trang phong that - xem docstring dau file.
+                # Chua co nguon (xem docstring dau file).
                 "price_per_night": None,
                 "currency": None,
                 "sold_out": None,
+                "review_score": None,
+                "review_text": None,
             }
         )
     return rooms

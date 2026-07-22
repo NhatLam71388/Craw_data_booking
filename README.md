@@ -76,6 +76,13 @@ base image `apify/actor-python-playwright` (đã có sẵn Playwright + trình d
 - `hotelIds` **không hỗ trợ ID số đơn thuần** như Agoda (Booking.com không có cơ chế redirect
   tương đương `?hid=`) — phải cung cấp dạng `<mã quốc gia>/<slug>` (vd `vn/the-chum-boutique`,
   lấy từ URL thật) hoặc dùng `propertyUrls`.
+- **Dữ liệu phòng chi tiết (`bed`/`size`/`max_occupancy`) đôi khi thiếu ở 1 vài phòng**: nguồn
+  `RoomDetails` có tỷ lệ ~1/4 phiên bị thiếu hoàn toàn (biến thể gắn theo session/cookie, không
+  phải lỗi mạng) — actor tự **bootstrap lại** (lấy cookie mới) và thử lại tối đa 3 lần khi phát
+  hiện thiếu, nhưng không đảm bảo 100%. `view`/`amenities` (lấy từ nguồn khác ổn định hơn) không
+  bị ảnh hưởng. `rooms[].price_per_night`/`currency`/`sold_out`/`review_score`/`review_text`
+  hiện luôn `null` — Booking.com không lộ ra giá/tình trạng còn phòng/đánh giá riêng theo từng
+  loại phòng qua các nguồn đã tìm ra (giá chỉ có ở cấp khách sạn, xem mục trên).
 
 ---
 
@@ -153,7 +160,7 @@ base image `apify/actor-python-playwright` (đã có sẵn Playwright + trình d
 | `check_in` / `check_out` | Ngày dùng để tính giá (nếu có cấp `checkIn`), `null` nếu không |
 | `check_in_time` / `check_in_until` / `check_out_time` | Giờ nhận phòng từ / nhận phòng đến (muộn nhất, thường `null` — không phải khách sạn nào cũng giới hạn) / trả phòng đến (vd `15:00` / `null` / `12:00`) |
 | `room_types` | Danh sách tên loại phòng |
-| `rooms` | Chi tiết từng phòng: `name`, `room_id`, `amenities` (tiện nghi phòng), `image_count`, `images` (toàn bộ ảnh phòng), `price_per_night`/`currency`/`sold_out` (hiện luôn `null` — xem "Giới hạn đã biết") |
+| `rooms` | Chi tiết từng phòng: `name`, `room_id`, `bed`, `size` (vd `"40 m²"`), `max_occupancy` (số khách tối đa), `view`, `amenities` (tiện nghi phòng), `image_count`, `images` (toàn bộ ảnh phòng). `price_per_night`/`currency`/`sold_out`/`review_score`/`review_text` **hiện luôn `null`** — Booking.com không lộ ra giá/tình trạng/đánh giá riêng từng loại phòng qua nguồn đã reverse-engineer (xem "Giới hạn đã biết"); `review_score`/`review_text` theo phòng vốn là field chỉ Agoda có, Booking không có tương đương. Lưu ý: `bed` luôn hiển thị tiếng Anh đơn giản bất kể `language` (Booking không trả nhãn giường đã dịch, khác các field khác). |
 | `image_url` / `image_count` / `all_images` | Ảnh khách sạn (toàn bộ thư viện ảnh) |
 | `coordinates` | Toạ độ dạng chuỗi `"lat,lng"` — dán thẳng được vào Google Maps |
 | `property_url` | URL trang khách sạn |
@@ -180,9 +187,14 @@ base image `apify/actor-python-playwright` (đã có sẵn Playwright + trình d
    `ROOT_QUERY.hotelPageByPageName(...).propertyFullExtended.starRating` (hạng sao, là 1
    tham chiếu tới `StarRating.value`), `Property.propertyGallery(...).mainGalleryPhotos[]`
    (ảnh), `ROOT_QUERY.breadcrumbs(...).breadcrumbItems[]` lọc `type=="district"` (khu vực),
-   `Property.houseRules.checkinCheckoutTimes` (giờ nhận/trả phòng), `RoomData` (phòng: tên,
-   tiện nghi qua `BaseFacility`→`Instance`, ảnh qua `RoomPhoto`). Trang này **không có giá**
-   (xem "Giới hạn đã biết").
+   `Property.houseRules.checkinCheckoutTimes` (giờ nhận/trả phòng). Phòng (`rooms[]`) gộp 2
+   nguồn theo cùng 1 id: `RoomData` (tên, ảnh, tiện nghi/view qua `BaseFacility`→`Instance`,
+   lọc `groupId==14` ra `view`) và `RoomDetails` (`roomSizeM2`, `bedConfigurations`,
+   `occupancy`) — cả 2 là entity "mồ côi" trong cache (không có gì tham chiếu `__ref` tới,
+   vì `RoomTableQueryResult.roomCards` đáng lẽ link chúng lại rỗng) nhưng vẫn đọc được trực
+   tiếp. `RoomDetails` có tỷ lệ thiếu ~1/4 phiên (xem "Giới hạn đã biết") nên actor tự
+   bootstrap lại + thử lại khi phát hiện thiếu. Trang này **không có giá** (xem "Giới hạn
+   đã biết").
 4. **2 lời gọi bổ sung** (không nằm trong cache SSR chính, phải gọi riêng qua
    `POST /dml/graphql`, xem `src/property_extras_query.py`):
    - `PropertySurroundingsBlockDesktop` → `nearby_attractions`/`nearby_essentials`. Gửi
