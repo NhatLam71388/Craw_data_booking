@@ -49,8 +49,10 @@ base image `apify/actor-python-playwright` (đã có sẵn Playwright + trình d
 
 - Nhận **từ khóa tìm kiếm** (tên khách sạn), **URL trang khách sạn**, hoặc **tên vùng/thành
   phố** làm đầu vào — Booking.com dùng chung 1 endpoint tìm kiếm cho cả 2 trường hợp.
-- Trả về: tên, địa chỉ, tọa độ, điểm review tổng + theo hạng mục, loại phòng, tiện nghi từng
-  phòng, ảnh.
+- Trả về: tên, địa chỉ, tọa độ, hạng sao, điểm review tổng + theo hạng mục, tiện nghi, ảnh, loại
+  phòng, tiện nghi từng phòng.
+- **Giá thực tế theo ngày check-in** cho khách sạn tìm qua `searchTerms`/`locations` kèm
+  `checkIn` (hoặc URL vùng có sẵn `checkin`/`checkout`) — xem "Cơ chế hoạt động".
 - Hỗ trợ đa ngôn ngữ (dữ liệu trả về theo `language`) và đa tiền tệ hiển thị (`currency`).
 - Hỗ trợ **proxy** và **giới hạn tần suất** để giảm nguy cơ bị chặn.
 - Bắt lỗi theo từng khách sạn: một lỗi không làm hỏng cả run.
@@ -63,12 +65,14 @@ base image `apify/actor-python-playwright` (đã có sẵn Playwright + trình d
   trên URL không có tác dụng (trang luôn server-render trang đầu). Nếu bạn cần nhiều hơn 25
   khách sạn/vùng, dùng nhiều từ khóa `locations` cụ thể hơn (theo quận/khu vực nhỏ) thay vì 1
   thành phố lớn.
-- **Chưa lấy được giá phòng thực tế theo ngày check-in**: dù truyền đủ `checkin`/`checkout`/
-  `group_adults`/`no_rooms` vào URL, bảng giá phòng (`RoomTableQueryResult.roomCards`) vẫn trả
-  về rỗng — có thể Booking.com cần 1 phiên bắt nguồn từ trang tìm kiếm (referrer) hoặc 1 cơ chế
-  client-side khác chưa xác định. Các trường `price`, `currency`, `rooms_available` hiện luôn
-  `null`. **Đây là việc cần nghiên cứu tiếp** (tương tự cách actor Agoda cũng thêm tính năng giá
-  sau, không phải từ bản đầu tiên).
+- **Giá chỉ có khi khách sạn được tìm qua `searchTerms`/`locations`** (đi qua bước tìm kiếm).
+  Trang chi tiết khách sạn (`RoomTableQueryResult.roomCards`) luôn trả về rỗng dù truyền đủ
+  `checkin`/`checkout`/`group_adults`/`no_rooms` — giá thật thực ra nằm ở chính **trang kết quả
+  tìm kiếm** (`priceDisplayInfoIrene`), không phải trang chi tiết. Vì vậy: dùng trực tiếp
+  `propertyUrls`/`hotelIds` (không qua tìm kiếm) sẽ **không có giá** (`price`/`currency`/
+  `rooms_available` là `null`) — muốn có giá, dùng `searchTerms` hoặc `locations` kèm `checkIn`.
+  Giá phòng riêng lẻ từng loại phòng (`rooms[].price_per_night`) vẫn chưa lấy được (chỉ có giá
+  tổng hợp `price` ở cấp khách sạn).
 - `hotelIds` **không hỗ trợ ID số đơn thuần** như Agoda (Booking.com không có cơ chế redirect
   tương đương `?hid=`) — phải cung cấp dạng `<mã quốc gia>/<slug>` (vd `vn/the-chum-boutique`,
   lấy từ URL thật) hoặc dùng `propertyUrls`.
@@ -80,11 +84,11 @@ base image `apify/actor-python-playwright` (đã có sẵn Playwright + trình d
 | Field | Kiểu | Mô tả |
 |-------|------|-------|
 | `searchTerms` | array (string) | Tên khách sạn cụ thể (vd `"The Chum Boutique Hue"`). |
-| `propertyUrls` | array (string) | URL trang khách sạn Booking.com. Nếu URL có sẵn `checkin`/`checkout`/`group_adults`/`no_rooms`, actor dùng luôn các tham số đó. |
-| `hotelIds` | array (string) | Dạng `<mã quốc gia>/<slug>` (vd `vn/the-chum-boutique`) — **không phải ID số đơn thuần** (xem giới hạn ở trên). |
-| `locations` | array (string) | Tên vùng/thành phố (vd `"Hue"`) hoặc link trang search Booking.com (vd `https://www.booking.com/searchresults.html?ss=Hue`). Giới hạn ~25 khách sạn/vùng (xem giới hạn ở trên). |
+| `propertyUrls` | array (string) | URL trang khách sạn Booking.com. Không đi qua bước tìm kiếm nên **không có giá** (xem giới hạn ở trên), dù URL có sẵn `checkin`/`checkout`. |
+| `hotelIds` | array (string) | Dạng `<mã quốc gia>/<slug>` (vd `vn/the-chum-boutique`) — **không phải ID số đơn thuần** (xem giới hạn ở trên). Cũng không có giá (giống `propertyUrls`). |
+| `locations` | array (string) | Tên vùng/thành phố (vd `"Hue"`) hoặc link trang search Booking.com (vd `https://www.booking.com/searchresults.html?ss=Hue&checkin=2026-08-01&checkout=2026-08-03`). Giới hạn ~25 khách sạn/vùng. Nếu link có `checkin`/`checkout`/`group_adults`/`no_rooms`, mọi khách sạn tìm được sẽ có **giá thực tế**. |
 | `maxItemsPerLocation` | integer | Số khách sạn tối đa lấy cho mỗi vùng (thực tế bị chặn ở ~25 do giới hạn phân trang). Mặc định `50`. |
-| `checkIn` | string | Ngày check-in mặc định (`YYYY-MM-DD`) cho khách sạn không có sẵn ngày từ URL. **Hiện chưa cho ra giá thực tế** (xem giới hạn) nhưng vẫn được gửi kèm request để sẵn sàng khi tìm ra cơ chế đúng. |
+| `checkIn` | string | Ngày check-in mặc định (`YYYY-MM-DD`) cho `searchTerms`/`locations` không có sẵn ngày từ URL — **cho ra giá thực tế**. Không ảnh hưởng `propertyUrls`/`hotelIds` (xem giới hạn ở trên). |
 | `lengthOfStay` | integer | Số đêm ở lại, dùng cùng `checkIn`. Mặc định `1`. |
 | `adults` / `rooms` | integer | Số người lớn / số phòng, dùng cùng `checkIn`. Mặc định `2` / `1`. |
 | `currency` | string | Mã tiền tệ hiển thị (vd `USD`, `VND`). Mặc định `USD`. |
@@ -116,6 +120,20 @@ base image `apify/actor-python-playwright` (đã có sẵn Playwright + trình d
 }
 ```
 
+### Ví dụ input — kèm giá thực tế theo ngày check-in
+
+```json
+{
+  "locations": ["Ho Chi Minh City"],
+  "checkIn": "2026-08-01",
+  "lengthOfStay": 2,
+  "adults": 2,
+  "rooms": 1,
+  "language": "vi",
+  "currency": "VND"
+}
+```
+
 ---
 
 ## Output (mỗi bản ghi vào Dataset)
@@ -124,13 +142,16 @@ base image `apify/actor-python-playwright` (đã có sẵn Playwright + trình d
 |-------|-------|
 | `hotel_id` / `hotel_name` | Định danh & tên |
 | `accommodation_type` | Loại hình (vd `HOTEL`) |
+| `star_rating` | Hạng sao chính thức (thường `null` với homestay/căn hộ nhỏ — Booking.com không bắt buộc khai báo) |
 | `address` / `city` / `country` | Vị trí (`country` là mã 2 chữ, vd `vn`) |
 | `review_score` / `review_count` | Điểm & số lượng review tổng |
 | `category_scores` | Điểm theo hạng mục — **nhãn đã dịch theo `language`** (vd `{"Nhân viên phục vụ": 9.4, "Địa điểm": 9.5, ...}`), lấy trực tiếp từ Booking.com nên đúng cho mọi ngôn ngữ |
-| `price` / `currency` / `rooms_available` | **Hiện luôn `null`** — xem "Giới hạn đã biết" |
+| `amenities` | Tiện nghi nổi bật (danh sách nhỏ — Booking.com không lộ ra 1 danh sách tiện nghi đầy đủ + nhóm rõ ràng như Agoda) |
+| `price` / `currency` / `rooms_available` | Giá tổng hợp rẻ nhất/đêm — **chỉ có khi tìm qua `searchTerms`/`locations` kèm `checkIn`**, `null` nếu dùng `propertyUrls`/`hotelIds` hoặc không cấp `checkIn` (xem "Giới hạn đã biết") |
 | `check_in` / `check_out` | Ngày dùng để tính giá (nếu có cấp `checkIn`), `null` nếu không |
 | `room_types` | Danh sách tên loại phòng |
-| `rooms` | Chi tiết từng phòng: `name`, `room_id`, `amenities` (tiện nghi phòng), `image_count`, `images` (toàn bộ ảnh phòng), `price_per_night`/`currency`/`sold_out` (hiện luôn `null`) |
+| `rooms` | Chi tiết từng phòng: `name`, `room_id`, `amenities` (tiện nghi phòng), `image_count`, `images` (toàn bộ ảnh phòng), `price_per_night`/`currency`/`sold_out` (hiện luôn `null` — xem "Giới hạn đã biết") |
+| `image_url` / `image_count` / `all_images` | Ảnh khách sạn (toàn bộ thư viện ảnh) |
 | `coordinates` | Toạ độ dạng chuỗi `"lat,lng"` — dán thẳng được vào Google Maps |
 | `property_url` | URL trang khách sạn |
 | `warnings` | Cảnh báo parse (rỗng nếu bình thường) |
@@ -144,13 +165,19 @@ base image `apify/actor-python-playwright` (đã có sẵn Playwright + trình d
    tự giải trong trình duyệt, lấy cookie từ browser context, áp vào httpx client. Nếu 1 request
    sau đó vẫn có dấu hiệu challenge (status `202` hoặc body chứa `awsWafCookieDomainList`), tự
    bootstrap lại 1 lần.
-2. **Tìm kiếm** (`searchTerms`/`locations`) — `GET /searchresults.html?ss=<tu khoa>` → tách khối
+2. **Tìm kiếm** (`searchTerms`/`locations`) — `GET /searchresults.html?ss=<tu khoa>` (kèm
+   `checkin`/`checkout`/`group_adults`/`no_rooms` nếu có `checkIn`) → tách khối
    `<script type="application/json">` chứa `"ROOT_QUERY"` (Apollo cache đã normalize) → đọc
-   `ROOT_QUERY.searchQueries["search(...)"].results[]`.
+   `ROOT_QUERY.searchQueries["search(...)"].results[]`. **Đây cũng là nguồn giá** — mỗi kết quả
+   có sẵn `priceDisplayInfoIrene.displayPrice.amountPerStay` (tổng giá cả kỳ nghỉ), actor tự
+   chia cho số đêm để ra giá/đêm.
 3. **Chi tiết khách sạn** — `GET /hotel/<cc>/<slug>.html` → cùng kỹ thuật tách Apollo cache →
    `BasicPropertyData` (tên, địa chỉ, tọa độ), `PropertyReview` (điểm tổng),
    `ROOT_QUERY.reviewsFrontend(...).ratingScores[]` (điểm theo hạng mục, đã dịch sẵn),
-   `RoomData` (phòng: tên, tiện nghi qua `BaseFacility`→`Instance`, ảnh qua `RoomPhoto`).
+   `ROOT_QUERY.hotelPageByPageName(...).propertyFullExtended.starRating` (hạng sao),
+   `Property.propertyGallery(...).mainGalleryPhotos[]` (ảnh), `Property.highlights(...)` (tiện
+   nghi nổi bật), `RoomData` (phòng: tên, tiện nghi qua `BaseFacility`→`Instance`, ảnh qua
+   `RoomPhoto`). Trang này **không có giá** (xem "Giới hạn đã biết").
 
 > Booking.com không công bố API nên schema có thể đổi theo thời gian. Nếu kết quả rỗng/lỗi, mở
 > DevTools > Network trên 1 trang search hoặc chi tiết khách sạn, tìm thẻ

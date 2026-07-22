@@ -7,22 +7,30 @@ Cach hoat dong (da reverse-engineer, khac han Agoda vi Booking.com co AWS WAF JS
   2. Tim kiem: GET /searchresults.html?ss=<tu khoa> -> HTML co nhung 1 khoi JSON la
      Apollo GraphQL cache (da normalize). Dung chung 1 co che cho ca tim ten khach san
      LAN tim theo vung/thanh pho - Booking khong phan biet 2 loai nay o cung 1 endpoint.
+     Neu goi kem checkin/checkout/group_adults/no_rooms, MOI ket qua co san
+     `priceDisplayInfoIrene` (gia that cho ky nghi) -> day la nguon gia CHINH (xem
+     _extract_result_price), khong phai tu trang chi tiet khach san.
      GIOI HAN DA BIET: trang chi tra ve toi da ~25 khach san/lan tai (nbResultsPerPage=25);
      co the co hang nghin ket qua (nbResultsTotal) nhung co che phan trang that (client-side
      GraphQL, offset trong query variables) chua reverse-engineer duoc - tam thoi CHI lay
      duoc trang dau (toi da 25 khach san moi vung/tu khoa).
   3. Chi tiet 1 khach san: GET /hotel/<country>/<slug>.html -> cung ky thuat tach Apollo
      cache -> BasicPropertyData, PropertyReview, RoomData, RatingScore (category_scores
-     nam o ROOT_QUERY.reviewsFrontend(...).ratingScores[], xem extract_category_scores)...
-     GIOI HAN DA BIET: gia phong thuc te theo ngay (`checkin`/`checkout` query param)
-     CHUA lay duoc - RoomTableQueryResult.roomCards tra ve rong ngay ca khi truyen du
-     checkin/checkout/group_adults/no_rooms. Co the can 1 co che client-side khac chua
-     tim ra. Cac truong gia (price/currency/rooms_available/room_offers) tam de None/rong.
+     nam o ROOT_QUERY.reviewsFrontend(...).ratingScores[]), starRating (o
+     ROOT_QUERY.hotelPageByPageName(...).propertyFullExtended), anh (Property.
+     propertyGallery(...).mainGalleryPhotos[] -> AccommodationPhoto), amenities (Property.
+     highlights(...).entities[] -> BaseFacility -> Instance.title).
+     GIOI HAN DA BIET: RoomTableQueryResult.roomCards (bang gia tren trang chi tiet) LUON
+     RONG du da truyen du checkin/checkout/group_adults/no_rooms - vi vay gia phong LAY TU
+     BUOC TIM KIEM (xem muc 2), khong phai tu trang chi tiet. Neu 1 khach san duoc fetch
+     truc tiep qua propertyUrls/hotelIds (khong qua buoc tim kiem), se KHONG co gia.
 """
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import asyncio
+import unicodedata
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
@@ -117,48 +125,97 @@ class BookingClient:
         return resp
 
     # --- 1) Tim kiem (dung chung cho ten khach san va vung/thanh pho) --------
-    async def search(self, term: str, max_items: int) -> list[dict[str, Any]]:
+    async def search(
+        self,
+        term: str,
+        max_items: int,
+        search_criteria: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
         """Tim khach san theo tu khoa (ten cu the hoac ten vung/thanh pho).
+
+        Neu co search_criteria (checkIn...), goi kem checkin/checkout/group_adults/
+        no_rooms de moi ket qua co san gia that (`price`/`currency`/`check_in`/`check_out`
+        trong dict tra ve) - day la nguon gia CHINH cua actor nay (xem docstring dau file).
 
         CHI lay duoc trang dau (toi da _SEARCH_PAGE_SIZE khach san) - xem gioi han
         o docstring dau file. max_items > _SEARCH_PAGE_SIZE se bi cat bot kem canh bao.
         """
-        params = {"ss": term, "lang": self.language, "selected_currency": self.currency}
-        try:
-            resp = await self._get(SEARCH_URL, params=params)
-            resp.raise_for_status()
-        except Exception as exc:  # noqa: BLE001
-            raise BookingError(f"Tim kiem that bai cho '{term}': {exc}") from exc
+        # Chuan hoa Unicode ve NFC: URL copy tu trinh duyet thuong ma hoa tieng Viet
+        # o dang to hop (vd "o" + dau mu + dau huyen roi rac, 2+ ma diem) thay vi 1 ky
+        # tu duy nhat da ghep san. Da xac nhan Booking.com xu ly dang to hop KEM ON DINH
+        # HON (hay tra ve bien the trang thieu ket qua) - normalize truoc khi goi.
+        term = unicodedata.normalize("NFC", term)
+        params: dict[str, Any] = {"ss": term, "lang": self.language, "selected_currency": self.currency}
+        nights = 0
+        if search_criteria:
+            nights = _nights_between(search_criteria["check_in"], search_criteria["check_out"])
+            params.update(
+                {
+                    "checkin": search_criteria["check_in"],
+                    "checkout": search_criteria["check_out"],
+                    "group_adults": search_criteria.get("adults", 2),
+                    "no_rooms": search_criteria.get("rooms", 1),
+                    "group_children": 0,
+                }
+            )
 
-        cache = extract_apollo_cache(resp.text)
-        if not cache:
-            raise BookingError(f"Khong tach duoc du lieu tim kiem cho '{term}' (co the van bi WAF chan)")
+        # Booking.com thinh thoang tra ve 1 bien the trang KHONG co khoi ket qua tim
+        # kiem (page nhe hon, khong ro nguyen nhan - co the do A/B test/load balancing;
+        # da quan sat thay ca 2 lan lien tiep deu truot) - thu lai toi da 3 lan, cach nhau
+        # 1 chut, truoc khi bao loi. Khac voi truong hop tim kiem hop le nhung khong co
+        # khach san nao (van tra ve list rong, khong retry).
+        last_exc: Exception | None = None
+        for attempt in range(3):
+            if attempt > 0:
+                await asyncio.sleep(1.5)
+            try:
+                resp = await self._get(SEARCH_URL, params=params)
+                resp.raise_for_status()
+            except Exception as exc:  # noqa: BLE001
+                last_exc = BookingError(f"Tim kiem that bai cho '{term}': {exc}")
+                continue
 
-        results = _extract_search_results(cache)
-        limit = min(max_items, _SEARCH_PAGE_SIZE) if max_items > 0 else _SEARCH_PAGE_SIZE
-        return results[:limit]
+            cache = extract_apollo_cache(resp.text)
+            if not cache:
+                last_exc = BookingError(f"Khong tach duoc du lieu tim kiem cho '{term}' (co the van bi WAF chan)")
+                continue
 
-    # --- 1b) URL search Booking.com -> tach tu khoa (fallback khi can) -------
+            if not _has_search_results_key(cache):
+                last_exc = BookingError(
+                    f"Trang tim kiem cho '{term}' tra ve bien the khong co ket qua sau {attempt + 1} lan thu"
+                )
+                continue
+
+            results = _extract_search_results(cache, search_criteria, nights)
+            limit = min(max_items, _SEARCH_PAGE_SIZE) if max_items > 0 else _SEARCH_PAGE_SIZE
+            return results[:limit]
+
+        raise last_exc or BookingError(f"Tim kiem that bai cho '{term}' sau nhieu lan thu")
+
+    # --- 1b) URL search Booking.com -> tach tu khoa + tieu chi ngay/khach ----
     async def search_from_url(self, url: str, max_items: int) -> list[dict[str, Any]]:
-        """Neu URL la trang search Booking.com, tach tham so ss= roi goi search()."""
+        """Neu URL la trang search Booking.com, tach tham so ss= (+ checkin/checkout/
+        adults/rooms neu co) roi goi search()."""
         qs = parse_qs(urlparse(url).query)
         term = (qs.get("ss") or [None])[0]
         if not term:
             raise BookingError(f"URL khong co tham so 'ss=' de xac dinh tu khoa tim kiem: {url}")
-        return await self.search(term, max_items)
+        return await self.search(term, max_items, search_criteria=extract_search_criteria_from_url(url))
 
     # --- 2) Chi tiet 1 khach san ---------------------------------------------
     async def fetch_hotel(
         self,
         property_url: str,
         search_criteria: dict[str, Any] | None = None,
+        price_hint: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Lay du lieu 1 khach san tu URL trang chi tiet, tra ve record chuan.
 
         search_criteria (tuy chon): {"check_in","check_out","adults","rooms"} - duoc gan
-        vao query string (checkin/checkout/group_adults/no_rooms) khi goi trang, nhung
-        HIEN CHUA xac nhan duoc co gia phong that tra ve (xem gioi han o dau file) - cac
-        truong gia trong record se de None cho toi khi nghien cuu them.
+        vao query string khi goi trang (anh huong ngon ngu/hien thi), nhung KHONG lam
+        trang chi tiet tra ve gia (xem gioi han o dau file).
+        price_hint (tuy chon): {"price","currency"} lay tu buoc tim kiem (search()) -
+        ghi de vao record vi day moi la nguon gia dang tin cay.
         """
         params: dict[str, Any] = {"lang": self.language, "selected_currency": self.currency}
         if search_criteria:
@@ -182,7 +239,11 @@ class BookingClient:
         if not cache:
             raise BookingError(f"Khong tach duoc du lieu khach san tu {property_url} (co the van bi WAF chan)")
 
-        return _map_hotel(cache, property_url, search_criteria)
+        record = _map_hotel(cache, property_url, search_criteria)
+        if price_hint:
+            record["price"] = price_hint.get("price")
+            record["currency"] = price_hint.get("currency")
+        return record
 
 
 def _looks_like_challenge(resp: httpx.Response) -> bool:
@@ -207,8 +268,80 @@ def is_search_url(url: str) -> bool:
     return "/searchresults" in url
 
 
-def _extract_search_results(cache: dict[str, Any]) -> list[dict[str, Any]]:
-    """Tach danh sach khach san tu ROOT_QUERY.searchQueries."search(...)".results[]."""
+def extract_search_criteria_from_url(url: str) -> dict[str, Any] | None:
+    """Trich checkin/checkout/adults/rooms tu 1 URL Booking.com bat ky (search hoac
+    trang khach san) - ca 2 loai trang deu dung chung ten tham so
+    checkin/checkout/group_adults/no_rooms. Tra None neu khong co checkin.
+    """
+    if not url:
+        return None
+    qs = parse_qs(urlparse(url).query)
+
+    def _get(key: str) -> str | None:
+        vals = qs.get(key)
+        return vals[0] if vals else None
+
+    check_in = _get("checkin")
+    check_out = _get("checkout")
+    if not (check_in and check_out):
+        return None
+
+    def _int_or(key: str, default: int) -> int:
+        try:
+            return int(_get(key) or default)
+        except ValueError:
+            return default
+
+    return {
+        "check_in": check_in,
+        "check_out": check_out,
+        "adults": _int_or("group_adults", 2),
+        "rooms": _int_or("no_rooms", 1),
+    }
+
+
+def _nights_between(check_in: str, check_out: str) -> int:
+    try:
+        d_in = datetime.strptime(check_in, "%Y-%m-%d")
+        d_out = datetime.strptime(check_out, "%Y-%m-%d")
+        return max((d_out - d_in).days, 0)
+    except ValueError:
+        return 0
+
+
+def _extract_result_price(item: dict[str, Any], nights: int) -> tuple[float | None, str | None]:
+    """Gia/dem tu priceDisplayInfoIrene.displayPrice.amountPerStay (tong ca ky nghi) ->
+    chia cho so dem de ra gia/dem (Booking khong tra san averagePricePerNight - luon 0).
+    """
+    if nights <= 0:
+        return None, None
+    pdi = item.get("priceDisplayInfoIrene") or {}
+    amount_per_stay = ((pdi.get("displayPrice") or {}).get("amountPerStay")) or {}
+    total = _coerce_float(amount_per_stay.get("amountUnformatted"))
+    currency = amount_per_stay.get("currency") or None
+    if not total:
+        return None, None
+    return round(total / nights, 2), currency
+
+
+def _has_search_results_key(cache: dict[str, Any]) -> bool:
+    """True neu cache co khoi ROOT_QUERY.searchQueries."search(...)" (bien the trang
+    hop le). False nghia la trang tra ve thieu du lieu (xem retry trong search())."""
+    root = cache.get("ROOT_QUERY") or {}
+    search_queries = root.get("searchQueries") or {}
+    return any(k.startswith("search(") for k in search_queries)
+
+
+def _extract_search_results(
+    cache: dict[str, Any],
+    search_criteria: dict[str, Any] | None,
+    nights: int,
+) -> list[dict[str, Any]]:
+    """Tach danh sach khach san tu ROOT_QUERY.searchQueries."search(...)".results[].
+
+    Neu co search_criteria, gan kem gia (price/currency) tu priceDisplayInfoIrene cua
+    tung ket qua - day la nguon gia CHINH cua actor (xem docstring dau file).
+    """
     root = cache.get("ROOT_QUERY") or {}
     search_queries = root.get("searchQueries") or {}
     search_key = next((k for k in search_queries if k.startswith("search(")), None)
@@ -226,11 +359,18 @@ def _extract_search_results(cache: dict[str, Any]) -> list[dict[str, Any]]:
             continue
         property_url = f"{BASE}/hotel/{country_code}/{page_name}.html"
         display_name = (item.get("displayName") or {}).get("text")
+
+        price, currency = (None, None)
+        if search_criteria:
+            price, currency = _extract_result_price(item, nights)
+
         out.append(
             {
                 "hotel_id": hotel_id,
                 "hotel_name": display_name or bpd.get("name"),
                 "property_url": property_url,
+                "price": price,
+                "currency": currency,
             }
         )
     return out
@@ -305,6 +445,62 @@ def _abs_image_url(uri: str | None) -> str | None:
     return CDN_BASE + uri
 
 
+def _extract_star_rating(cache: dict[str, Any]) -> float | None:
+    """Hang sao chinh thuc, nam o ROOT_QUERY.hotelPageByPageName(...).propertyFullExtended
+    .starRating -> {"__ref": "StarRating:{}"} -> StarRating.value.
+
+    Co THE CO NHIEU key "hotelPageByPageName(...)" voi bien khac nhau (co/khong
+    searchConfig) - chi key co "searchConfig" moi co du lieu day du, cac key khac tra
+    ve propertyFullExtended rong. Thuong None voi cho o nho/homestay (khong bat buoc
+    khai bao sao).
+    """
+    root = cache.get("ROOT_QUERY") or {}
+    key = next((k for k in root if k.startswith("hotelPageByPageName(") and "searchConfig" in k), None)
+    if not key:
+        return None
+    extended = (root.get(key) or {}).get("propertyFullExtended") or {}
+    star_rating = resolve_ref(cache, extended.get("starRating"))
+    if not isinstance(star_rating, dict):
+        return None
+    return _coerce_float(star_rating.get("value"))
+
+
+def _extract_amenities(cache: dict[str, Any]) -> list[str]:
+    """Tien nghi noi bat cua khach san, tu Property.highlights(...).entities[] (BaseFacility
+    -> Instance.title). Day la 1 tap NHO cac tien nghi noi bat (KHONG phai danh sach day du
+    nhu Agoda - Booking khong lo ra 1 danh sach tien nghi day du + nhom ro rang qua cache).
+    """
+    property_ = find_first(cache, "Property") or {}
+    hl_key = next((k for k in property_ if k.startswith("highlights(")), None)
+    if not hl_key:
+        return []
+    entities = (property_.get(hl_key) or {}).get("entities") or []
+    names = [name for ref in entities if (name := _resolve_facility_name(cache, ref))]
+    return names
+
+
+def _extract_images(cache: dict[str, Any]) -> list[str]:
+    """Toan bo anh khach san, tu Property.propertyGallery(...).mainGalleryPhotos[]
+    (AccommodationPhoto -> resource max1024x768 -> absoluteUrl)."""
+    property_ = find_first(cache, "Property") or {}
+    gal_key = next((k for k in property_ if k.startswith("propertyGallery(")), None)
+    if not gal_key:
+        return []
+    gallery = property_.get(gal_key) or {}
+    photos = resolve_list(cache, gallery.get("mainGalleryPhotos"))
+    urls: list[str] = []
+    for photo in photos:
+        if not isinstance(photo, dict):
+            continue
+        res_key = next((k for k in photo if k.startswith("resource(") and "max1024x768" in k), None)
+        if not res_key:
+            continue
+        url = (photo.get(res_key) or {}).get("absoluteUrl")
+        if url:
+            urls.append(url)
+    return urls
+
+
 def _map_hotel(
     cache: dict[str, Any],
     property_url: str,
@@ -324,19 +520,22 @@ def _map_hotel(
     lng = location.get("longitude")
 
     rooms = _extract_rooms(cache)
+    images = _extract_images(cache)
 
     record: dict[str, Any] = {
         "hotel_id": hotel_id,
         "hotel_name": basic.get("name"),
         "accommodation_type": property_type.get("type"),
+        "star_rating": _extract_star_rating(cache),
         "address": location.get("formattedAddress"),
         "city": location.get("city"),
         "country": location.get("countryCode"),
         "review_score": _coerce_float(total_score.get("score")),
         "review_count": _coerce_int(total_score.get("reviewsCount")),
         "category_scores": extract_category_scores(cache),
-        # Truong gia: CHUA xac nhan duoc co che lay gia that cho Booking.com (xem
-        # docstring dau file) - de None/rong cho toi khi nghien cuu them.
+        "amenities": _extract_amenities(cache),
+        # Truong gia: mac dinh None, se duoc fetch_hotel() ghi de bang price_hint neu co
+        # (gia THAT lay tu buoc tim kiem - xem docstring dau file).
         "price": None,
         "currency": None,
         "rooms_available": None,
@@ -344,6 +543,9 @@ def _map_hotel(
         "check_out": search_criteria.get("check_out") if search_criteria else None,
         "room_types": [r["name"] for r in rooms if r.get("name")],
         "rooms": rooms,
+        "image_url": images[0] if images else None,
+        "image_count": len(images),
+        "all_images": images,
         "coordinates": _format_coordinates(lat, lng),
         "property_url": property_url,
         "scraped_at": datetime.now(timezone.utc).isoformat(),

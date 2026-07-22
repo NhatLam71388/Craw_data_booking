@@ -9,7 +9,14 @@ from typing import Any
 
 from apify import Actor
 
-from .booking import BASE, BookingClient, BookingError, is_search_url, is_url
+from .booking import (
+    BASE,
+    BookingClient,
+    BookingError,
+    extract_search_criteria_from_url,
+    is_search_url,
+    is_url,
+)
 
 _BARE_NUMERIC_ID = re.compile(r"^\d+$")
 
@@ -40,11 +47,20 @@ async def main() -> None:
             await client.bootstrap()
             Actor.log.info("Da san sang, bat dau thu thap du lieu.")
 
-            # Gom tat ca property_url can crawl (kem search_criteria rieng neu co) - de-dup.
-            targets: dict[str, dict[str, Any] | None] = {}
+            # Gom tat ca property_url can crawl (kem search_criteria + price_hint rieng
+            # neu co) - de-dup theo URL.
+            targets: dict[str, dict[str, Any]] = {}
+
+            def _add_target(
+                url: str,
+                search_criteria: dict[str, Any] | None,
+                price_hint: dict[str, Any] | None = None,
+            ) -> None:
+                targets.setdefault(url, {"search_criteria": search_criteria, "price_hint": price_hint})
 
             # 1) hotelIds -> Booking.com CAN slug (vd "vn/the-chum-boutique"), khong ho
             # tro tim theo ID so don thuan nhu Agoda (khong co co che redirect tuong duong).
+            # KHONG di qua buoc tim kiem -> khong co gia (xem README).
             for hid in raw_hotel_ids:
                 hid_str = str(hid).strip().strip("/")
                 if _BARE_NUMERIC_ID.match(hid_str):
@@ -53,32 +69,42 @@ async def main() -> None:
                         "Can dang '<ma_quoc_gia>/<slug>' (vd 'vn/the-chum-boutique') hoac dung propertyUrls."
                     )
                     continue
-                targets.setdefault(f"{BASE}/hotel/{hid_str}.html", None)
+                _add_target(f"{BASE}/hotel/{hid_str}.html", global_criteria)
 
-            # 2) propertyUrls -> dung truc tiep, tach search_criteria tu chinh URL neu co.
+            # 2) propertyUrls -> dung truc tiep, tach search_criteria tu chinh URL neu co
+            # (fallback global_criteria). KHONG di qua buoc tim kiem -> khong co gia.
             for url in property_urls:
-                targets.setdefault(url, None)
+                _add_target(url, extract_search_criteria_from_url(url) or global_criteria)
 
-            # 3) searchTerms -> tim ten khach san cu the qua search().
+            # 3) searchTerms -> tim ten khach san cu the qua search(). Neu co
+            # global_criteria, ket qua tim kiem da co san gia (price_hint).
             for term in search_terms:
                 try:
-                    candidates = await client.search(term, max_items=5)
+                    candidates = await client.search(term, max_items=5, search_criteria=global_criteria)
                 except BookingError as exc:
                     Actor.log.warning(str(exc))
                     continue
                 if not candidates:
                     Actor.log.warning(f"Khong tim thay khach san cho tu khoa: '{term}'")
                 for cand in candidates:
-                    targets.setdefault(cand["property_url"], None)
+                    price_hint = (
+                        {"price": cand["price"], "currency": cand["currency"]}
+                        if cand.get("price") is not None
+                        else None
+                    )
+                    _add_target(cand["property_url"], global_criteria, price_hint)
 
             # 4) locations -> tim theo vung/thanh pho (ten hoac link search Booking.com).
-            # GIOI HAN: chi lay duoc toi da ~25 khach san/vung (xem booking.py).
+            # Neu la link co checkin/checkout, dung tieu chi do (uu tien hon global_criteria)
+            # va ket qua da co san gia. GIOI HAN: toi da ~25 khach san/vung (xem booking.py).
             for loc in locations:
+                loc_criteria = extract_search_criteria_from_url(loc) if is_url(loc) else None
+                effective_criteria = loc_criteria or global_criteria
                 try:
                     if is_url(loc) and is_search_url(loc):
                         candidates = await client.search_from_url(loc, max_items_per_location)
                     else:
-                        candidates = await client.search(loc, max_items_per_location)
+                        candidates = await client.search(loc, max_items_per_location, search_criteria=effective_criteria)
                 except BookingError as exc:
                     Actor.log.warning(str(exc))
                     continue
@@ -90,7 +116,12 @@ async def main() -> None:
                 else:
                     Actor.log.info(f"Vung '{loc}': tim thay {len(candidates)} khach san")
                 for cand in candidates:
-                    targets.setdefault(cand["property_url"], None)
+                    price_hint = (
+                        {"price": cand["price"], "currency": cand["currency"]}
+                        if cand.get("price") is not None
+                        else None
+                    )
+                    _add_target(cand["property_url"], effective_criteria, price_hint)
 
             if not targets:
                 Actor.log.warning("Khong co khach san nao de crawl. Kiem tra lai input.")
@@ -99,13 +130,16 @@ async def main() -> None:
             Actor.log.info(f"Tong so khach san se crawl: {len(targets)}")
 
             pushed = 0
-            for i, (property_url, url_criteria) in enumerate(targets.items()):
+            for i, (property_url, target_info) in enumerate(targets.items()):
                 if max_items and pushed >= max_items:
                     Actor.log.info(f"Da dat gioi han maxItems={max_items}, dung lai.")
                     break
                 try:
-                    search_criteria = url_criteria or global_criteria
-                    record = await client.fetch_hotel(property_url, search_criteria)
+                    record = await client.fetch_hotel(
+                        property_url,
+                        target_info["search_criteria"],
+                        target_info["price_hint"],
+                    )
                     await Actor.push_data(record)
                     pushed += 1
                     Actor.log.info(f"[{pushed}] Da luu khach san: {record.get('hotel_name') or property_url}")
@@ -123,8 +157,9 @@ async def main() -> None:
 def _build_global_criteria(actor_input: dict[str, Any]) -> dict[str, Any] | None:
     """Tieu chi ngay/khach mac dinh cho khach san khong co san checkin rieng.
 
-    Luu y: hien Booking.com CHUA xac nhan tra ve gia phong thuc te (xem booking.py) -
-    tieu chi nay van duoc gui kem request de san sang khi co the lay gia trong tuong lai.
+    Chi co gia thuc te (price_hint) cho searchTerms/locations (di qua buoc search()) -
+    xem booking.py. propertyUrls/hotelIds van dung tieu chi nay de goi trang chi tiet
+    (anh huong ngon ngu/hien thi) nhung KHONG co gia vi khong di qua buoc tim kiem.
     """
     check_in = actor_input.get("checkIn")
     if not check_in:
