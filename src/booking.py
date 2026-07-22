@@ -27,14 +27,22 @@ Cach hoat dong (da reverse-engineer, khac han Agoda vi Booking.com co AWS WAF JS
      RoomTableQueryResult.roomCards - noi le ra se link chung - lai rong) nhung van dung
      duoc truc tiep vi Apollo van normalize chung vao cache theo id. "view" duoc loc tu
      RoomData.amenities co groupId==14 (nhom "View" trong facilityGroups).
-     GIOI HAN DA BIET: RoomTableQueryResult.roomCards (bang gia tren trang chi tiet) LUON
+     GIOI HAN DA BIET: RoomTableQueryResult.roomCards (bang gia qua Apollo/GraphQL) LUON
      RONG du da truyen du checkin/checkout/group_adults/no_rooms - vi vay gia phong HOTEL
-     lay tu BUOC TIM KIEM (xem muc 2), khong phai tu trang chi tiet; gia/tinh trang CON
-     PHONG RIENG TUNG LOAI (rooms[].price_per_night/currency/sold_out) van CHUA co nguon.
-     rooms[].review_score/review_text cung KHONG co (da xac nhan qua HOTEL_ROOM_SCHEMA.md:
-     day la field CHI Agoda co, dataset Booking that khong co tuong duong). Neu 1 khach
-     san duoc fetch truc tiep qua propertyUrls/hotelIds (khong qua buoc tim kiem), gia
-     cap khach san (price/currency) cung se KHONG co.
+     (record["price"]) van lay tu BUOC TIM KIEM (xem muc 2). Nhung gia/tinh trang RIENG
+     TUNG LOAI PHONG (rooms[].price_per_night/currency/sold_out) lai co nguon KHAC: mot
+     khoi JSON hop le (KHONG phai Apollo/GraphQL) nhung thang trong HTML tho cua chinh
+     trang chi tiet, o bien cau hinh JS "legacy" (dung cho widget bang gia cu) duoi key
+     `b_rooms_available_and_soldout` - CHI xuat hien khi co checkin/checkout (tuc co
+     search_criteria). Danh sach nay CHI liet ke phong CON HANG (moi phong id = "b_id",
+     kem nhieu "block" b_blocks[] ung voi tung to hop chinh sach huy/bua sang, moi block
+     co "b_raw_price" = tong gia ky nghi); phong bi loai HOAN TOAN khoi day nghia la HET
+     PHONG (sold_out=True) cho dung ngay/so khach da yeu cau. Xem _extract_legacy_room_pricing()
+     va _extract_rooms(). rooms[].review_score/review_text van KHONG co (da xac nhan qua
+     HOTEL_ROOM_SCHEMA.md: day la field CHI Agoda co, dataset Booking that khong co tuong
+     duong). Neu 1 khach san duoc fetch truc tiep qua propertyUrls/hotelIds ma KHONG co
+     checkIn (khong co search_criteria), ca gia cap khach san LAN gia/tinh trang tung
+     phong deu se KHONG co (None).
   4. 2 loi goi bo sung (khong nam trong SSR cache chinh, phai goi rieng qua POST
      /dml/graphql - xem src/property_extras_query.py va fetch_surroundings/
      fetch_facilities):
@@ -52,6 +60,7 @@ Cach hoat dong (da reverse-engineer, khac han Agoda vi Booking.com co AWS WAF JS
 from __future__ import annotations
 
 import asyncio
+import json
 import unicodedata
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -385,7 +394,10 @@ class BookingClient:
         else:
             extra_warnings.append("facilities_unavailable")
 
-        record = _map_hotel(cache, property_url, search_criteria, surroundings, facilities_data)
+        legacy_pricing = _extract_legacy_room_pricing(resp.text)
+        record = _map_hotel(
+            cache, property_url, search_criteria, surroundings, facilities_data, legacy_pricing, self.currency
+        )
         record["warnings"].extend(extra_warnings)
         if price_hint:
             record["price"] = price_hint.get("price")
@@ -595,12 +607,79 @@ def _format_bed_configurations(bed_configs: list[dict[str, Any]] | None) -> str 
     return ", ".join(parts) if parts else None
 
 
-def _extract_rooms(cache: dict[str, Any]) -> list[dict[str, Any]]:
-    """Danh sach phong, gop 2 nguon theo CUNG 1 id (xem docstring dau file):
-    RoomData (ten, anh, tien nghi/view) + RoomDetails (size, giuong, so nguoi toi da).
+def _extract_legacy_room_pricing(html: str) -> dict[int, list[dict[str, Any]]] | None:
+    """Gia/tinh trang rieng tung phong - xem docstring dau file. Tra ve {room_id:
+    [block,...]} - CHI gom phong con hang (phong het phong KHONG co mat trong dict).
+    Tra None neu trang khong co khoi nay (vd fetch khong kem checkin/checkout).
 
-    CHUA co: price_per_night/currency/sold_out (gia/tinh trang rieng tung phong) va
-    review_score/review_text (Booking khong co field tuong duong - xem docstring dau file).
+    Khoi JSON nay KHONG phai Apollo cache (`extract_apollo_cache` khong tim thay) ma la
+    1 gia tri JSON hop le (key double-quote) gan cho bien `b_rooms_available_and_soldout`
+    trong 1 object JS lon hon (key khong quote kieu JS) - vi vay phai tu tach bang dem
+    ngoac (thay vi regex) roi json.loads() rieng doan do.
+    """
+    key = "b_rooms_available_and_soldout"
+    idx = html.find(key)
+    if idx == -1:
+        return None
+    start = html.find("[", idx)
+    if start == -1:
+        return None
+
+    depth = 0
+    in_str = False
+    esc = False
+    end = -1
+    for i in range(start, len(html)):
+        c = html[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+        else:
+            if c == '"':
+                in_str = True
+            elif c == "[":
+                depth += 1
+            elif c == "]":
+                depth -= 1
+                if depth == 0:
+                    end = i + 1
+                    break
+    if end == -1:
+        return None
+
+    try:
+        data = json.loads(html[start:end])
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, list):
+        return None
+
+    result: dict[int, list[dict[str, Any]]] = {}
+    for room in data:
+        room_id = room.get("b_id") if isinstance(room, dict) else None
+        if room_id is None:
+            continue
+        result[room_id] = room.get("b_blocks") or []
+    return result
+
+
+def _extract_rooms(
+    cache: dict[str, Any],
+    legacy_pricing: dict[int, list[dict[str, Any]]] | None = None,
+    nights: int | None = None,
+    currency: str | None = None,
+) -> list[dict[str, Any]]:
+    """Danh sach phong, gop 3 nguon theo CUNG 1 id (xem docstring dau file):
+    RoomData (ten, anh, tien nghi/view) + RoomDetails (size, giuong, so nguoi toi da) +
+    legacy_pricing (gia/tinh trang, tu _extract_legacy_room_pricing).
+
+    review_score/review_text van KHONG co (Booking khong co field tuong duong - xem
+    docstring dau file). legacy_pricing=None (khong co checkin/checkout) -> gia/tinh
+    trang cung se la None, giu nguyen hanh vi cu.
     """
     details_by_id = {rd.get("id"): rd for rd in find_all(cache, "RoomDetails")}
 
@@ -628,6 +707,23 @@ def _extract_rooms(cache: dict[str, Any]) -> list[dict[str, Any]]:
         occupancy = details.get("occupancy") or {}
         max_guests = occupancy.get("maxGuests") or occupancy.get("maxPersons")
 
+        price_per_night: float | None = None
+        room_currency: str | None = None
+        sold_out: bool | None = None
+        if legacy_pricing is not None:
+            blocks = legacy_pricing.get(room_id)
+            if not blocks:
+                sold_out = True
+            else:
+                sold_out = False
+                cheapest = min(
+                    blocks, key=lambda b: _coerce_float(b.get("b_raw_price")) if _coerce_float(b.get("b_raw_price")) is not None else float("inf")
+                )
+                raw_price = _coerce_float(cheapest.get("b_raw_price"))
+                if raw_price is not None:
+                    price_per_night = round(raw_price / nights, 2) if nights else raw_price
+                    room_currency = currency
+
         rooms.append(
             {
                 "name": translations.get("name"),
@@ -639,10 +735,10 @@ def _extract_rooms(cache: dict[str, Any]) -> list[dict[str, Any]]:
                 "amenities": amenities,
                 "image_count": len(images),
                 "images": images,
+                "price_per_night": price_per_night,
+                "currency": room_currency,
+                "sold_out": sold_out,
                 # Chua co nguon (xem docstring dau file).
-                "price_per_night": None,
-                "currency": None,
-                "sold_out": None,
                 "review_score": None,
                 "review_text": None,
             }
@@ -789,8 +885,10 @@ def _map_hotel(
     search_criteria: dict[str, Any] | None,
     surroundings: dict[str, Any] | None = None,
     facilities_data: dict[str, Any] | None = None,
+    legacy_pricing: dict[int, list[dict[str, Any]]] | None = None,
+    currency: str | None = None,
 ) -> dict[str, Any]:
-    """Map Apollo cache (+ surroundings/facilities bo sung neu co) -> record chuan."""
+    """Map Apollo cache (+ surroundings/facilities/legacy_pricing bo sung neu co) -> record chuan."""
     warnings: list[str] = []
     surroundings = surroundings or {}
     facilities_data = facilities_data or {}
@@ -805,10 +903,22 @@ def _map_hotel(
     lat = location.get("latitude")
     lng = location.get("longitude")
 
-    rooms = _extract_rooms(cache)
+    nights = _nights_between(search_criteria["check_in"], search_criteria["check_out"]) if search_criteria else None
+    rooms = _extract_rooms(cache, legacy_pricing, nights, currency)
     images = _extract_images(cache)
     amenities, amenity_groups = _extract_amenity_data(facilities_data)
     checkin_checkout = _extract_checkin_checkout_times(cache)
+
+    # Fallback gia cap khach san tu chinh legacy_pricing (xem docstring dau file) khi
+    # KHONG di qua buoc tim kiem (fetch_hotel() se ghi de bang price_hint - gia tin cay
+    # hon vi tu dung trang ket qua tim kiem - neu co). fallback = gia re nhat trong cac
+    # phong CON HANG. rooms_available = so loai phong con hang (sold_out=False).
+    fallback_price: float | None = None
+    rooms_available: int | None = None
+    if legacy_pricing is not None:
+        priced = [r["price_per_night"] for r in rooms if r.get("price_per_night") is not None]
+        fallback_price = min(priced) if priced else None
+        rooms_available = sum(1 for r in rooms if r.get("sold_out") is False)
 
     record: dict[str, Any] = {
         "hotel_id": hotel_id,
@@ -826,11 +936,11 @@ def _map_hotel(
         "amenity_groups": amenity_groups,
         "nearby_attractions": _extract_nearby_attractions(surroundings),
         "nearby_essentials": _extract_nearby_essentials(surroundings),
-        # Truong gia: mac dinh None, se duoc fetch_hotel() ghi de bang price_hint neu co
-        # (gia THAT lay tu buoc tim kiem - xem docstring dau file).
-        "price": None,
-        "currency": None,
-        "rooms_available": None,
+        # Uu tien price_hint (tu buoc tim kiem, fetch_hotel() se ghi de neu co) - fallback
+        # nay chi dung khi fetch truc tiep qua propertyUrls/hotelIds (xem docstring dau file).
+        "price": fallback_price,
+        "currency": currency if fallback_price is not None else None,
+        "rooms_available": rooms_available,
         "check_in": search_criteria.get("check_in") if search_criteria else None,
         "check_out": search_criteria.get("check_out") if search_criteria else None,
         "check_in_time": checkin_checkout["check_in_time"],
