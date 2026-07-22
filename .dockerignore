@@ -1,0 +1,12 @@
+.git
+.venv
+venv
+storage
+apify_storage
+crawlee_storage
+__pycache__
+*.pyc
+.idea
+.vscode
+.env
+.DS_Store

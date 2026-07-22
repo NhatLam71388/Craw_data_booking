@@ -1,0 +1,39 @@
+{
+    "actorSpecification": 1,
+    "views": {
+        "overview": {
+            "title": "Tong quan khach san",
+            "transformation": {
+                "fields": [
+                    "hotel_id",
+                    "hotel_name",
+                    "city",
+                    "country",
+                    "star_rating",
+                    "review_score",
+                    "review_count",
+                    "price",
+                    "currency",
+                    "property_url",
+                    "scraped_at"
+                ]
+            },
+            "display": {
+                "component": "table",
+                "properties": {
+                    "hotel_id": { "label": "Hotel ID" },
+                    "hotel_name": { "label": "Ten khach san" },
+                    "city": { "label": "Thanh pho" },
+                    "country": { "label": "Quoc gia" },
+                    "star_rating": { "label": "Sao" },
+                    "review_score": { "label": "Diem review" },
+                    "review_count": { "label": "So review" },
+                    "price": { "label": "Gia" },
+                    "currency": { "label": "Tien te" },
+                    "property_url": { "label": "URL" },
+                    "scraped_at": { "label": "Thoi diem crawl" }
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,21 @@
+# Apify local storage
+storage/
+apify_storage/
+crawlee_storage/
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Bien moi truong
+.env

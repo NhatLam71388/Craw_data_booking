@@ -1,0 +1,10 @@
+# Apify SDK cho Python (context actor, storage, proxy, log).
+apify >= 4.0, < 5.0
+
+# HTTP client bat dong bo de goi cac trang Booking.com sau khi da vuot WAF.
+httpx
+
+# KHONG pin phien ban playwright o day: base image apify/actor-python-playwright
+# da co san package + trinh duyet Chromium khop phien ban voi nhau. Neu can nang cap,
+# doi ca base image (FROM apify/actor-python-playwright:<tag>) thay vi sua o day,
+# de tranh lech phien ban package/browser gay loi runtime.
