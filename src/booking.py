@@ -824,15 +824,29 @@ def _extract_checkin_checkout_times(cache: dict[str, Any]) -> dict[str, str | No
     }
 
 
-def _extract_nearby_attractions(surroundings: dict[str, Any]) -> list[str]:
-    """Diem tham quan gan, tu propertySurroundings.landmarks.top[] (name + distanceLocalized)."""
+def _extract_nearby_attractions(surroundings: dict[str, Any]) -> list[dict[str, Any]]:
+    """Diem tham quan gan, tu propertySurroundings.landmarks.top[] (SurroundingGeoObject -
+    co san latitude/longitude rieng tung diem, khong phai suy tu toa do khach san)."""
     landmarks = (surroundings.get("landmarks") or {}).get("top") or []
-    return [f"{lm['name']} - {lm['distanceLocalized']}" for lm in landmarks if lm.get("name")]
+    out: list[dict[str, Any]] = []
+    for lm in landmarks:
+        if not lm.get("name"):
+            continue
+        out.append(
+            {
+                "name": lm.get("name"),
+                "distance_km": _coerce_float(lm.get("distance")),
+                "distance_text": lm.get("distanceLocalized"),
+                "coordinates": _format_coordinates(lm.get("latitude"), lm.get("longitude")),
+            }
+        )
+    return out
 
 
 def _extract_nearby_essentials(surroundings: dict[str, Any]) -> list[dict[str, Any]]:
     """San bay/giao thong gan, tu propertySurroundings.airports[] +
-    .publicTransport.{train,metro,bus}[]."""
+    .publicTransport.{train,metro,bus}[] (cung la SurroundingGeoObject, co san
+    latitude/longitude rieng tung diem)."""
     out: list[dict[str, Any]] = []
     for a in surroundings.get("airports") or []:
         out.append(
@@ -841,6 +855,7 @@ def _extract_nearby_essentials(surroundings: dict[str, Any]) -> list[dict[str, A
                 "name": a.get("name"),
                 "distance_km": _coerce_float(a.get("distance")),
                 "distance_text": a.get("distanceLocalized"),
+                "coordinates": _format_coordinates(a.get("latitude"), a.get("longitude")),
             }
         )
     public_transport = surroundings.get("publicTransport") or {}
@@ -852,6 +867,7 @@ def _extract_nearby_essentials(surroundings: dict[str, Any]) -> list[dict[str, A
                     "name": item.get("name"),
                     "distance_km": _coerce_float(item.get("distance")),
                     "distance_text": item.get("distanceLocalized"),
+                    "coordinates": _format_coordinates(item.get("latitude"), item.get("longitude")),
                 }
             )
     return out

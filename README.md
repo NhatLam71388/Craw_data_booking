@@ -159,8 +159,8 @@ base image `apify/actor-python-playwright` (đã có sẵn Playwright + trình d
 | `review_score` / `review_count` | Điểm & số lượng review tổng |
 | `category_scores` | Điểm theo hạng mục — **nhãn đã dịch theo `language`** (vd `{"Nhân viên phục vụ": 9.4, "Địa điểm": 9.5, ...}`), lấy trực tiếp từ Booking.com nên đúng cho mọi ngôn ngữ |
 | `amenities` / `amenity_groups` | Tiện nghi đầy đủ (phẳng & theo nhóm, vd `{"Phòng tắm": [...], "Đồ ăn & thức uống": [...]}`) — nhãn đã dịch theo `language` |
-| `nearby_attractions` | Điểm tham quan gần (vd `"Hầm Thủ Thiêm - 650 m"`) |
-| `nearby_essentials` | Sân bay/giao thông công cộng gần: `category`, `name`, `distance_km`, `distance_text` |
+| `nearby_attractions` | Điểm tham quan gần: `name`, `distance_km`, `distance_text`, `coordinates` (toạ độ riêng của điểm đó, dạng `"lat,lng"` — không phải toạ độ khách sạn) |
+| `nearby_essentials` | Sân bay/giao thông công cộng gần: `category`, `name`, `distance_km`, `distance_text`, `coordinates` (toạ độ riêng của điểm đó) |
 | `price` / `currency` / `rooms_available` | Giá rẻ nhất/đêm trong số các loại phòng còn hàng + số loại phòng còn hàng — **cần có `checkIn`** (từ `searchTerms`/`locations` hoặc `propertyUrls`/`hotelIds` kèm ngày), `null` nếu không có ngày (xem "Giới hạn đã biết"). Giá VND được làm tròn số nguyên (không thập phân). |
 | `check_in` / `check_out` | Ngày dùng để tính giá (nếu có cấp `checkIn`), `null` nếu không |
 | `check_in_time` / `check_in_until` / `check_out_time` | Giờ nhận phòng từ / nhận phòng đến (muộn nhất, thường `null` — không phải khách sạn nào cũng giới hạn) / trả phòng đến (vd `15:00` / `null` / `12:00`) |
