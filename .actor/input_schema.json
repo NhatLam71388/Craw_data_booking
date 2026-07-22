@@ -26,14 +26,14 @@
         "locations": {
             "title": "Vung / thanh pho can tim",
             "type": "array",
-            "description": "Ten vung/thanh pho (vd: 'Hue') HOAC dan link trang tim kiem Booking.com (vd: https://www.booking.com/searchresults.html?ss=Hue). Actor tu tim tat ca khach san trong vung do, gioi han boi maxItemsPerLocation.",
+            "description": "Ten vung/thanh pho (vd: 'Hue') HOAC dan link trang tim kiem Booking.com (vd: https://www.booking.com/searchresults.html?ss=Hue). Actor tu tim tat ca khach san trong vung do, gioi han boi maxItemsPerLocation. Moi lan tai (~25 khach san) can 1 request rieng, nen so vung x maxItemsPerLocation lon se ton nhieu thoi gian/request hon.",
             "editor": "stringList",
             "prefill": ["Hue"]
         },
         "maxItemsPerLocation": {
             "title": "So khach san toi da moi vung",
             "type": "integer",
-            "description": "So khach san toi da lay cho MOI vung trong 'locations'. 0 = khong gioi han (co tran an toan noi bo). Mac dinh 50.",
+            "description": "So khach san toi da lay cho MOI vung trong 'locations' (vd 200). Actor tu goi nhieu lan voi cac to hop loc hang sao/sap xep khac nhau de gom du so luong nay (moi ~25 khach san can 1 request). 0 = khong gioi han (dung o tran an toan 200). Mac dinh 50.",
             "default": 50,
             "minimum": 0
         },

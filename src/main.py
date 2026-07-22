@@ -96,7 +96,8 @@ async def main() -> None:
 
             # 4) locations -> tim theo vung/thanh pho (ten hoac link search Booking.com).
             # Neu la link co checkin/checkout, dung tieu chi do (uu tien hon global_criteria)
-            # va ket qua da co san gia. GIOI HAN: toi da ~25 khach san/vung (xem booking.py).
+            # va ket qua da co san gia. search() tu gom nhieu "trang" (loc hang sao + sap xep
+            # khac nhau) de vuot qua gioi han ~25/lan-tai cua Booking.com - xem booking.py.
             for loc in locations:
                 loc_criteria = extract_search_criteria_from_url(loc) if is_url(loc) else None
                 effective_criteria = loc_criteria or global_criteria
@@ -111,7 +112,7 @@ async def main() -> None:
                 if len(candidates) < max_items_per_location:
                     Actor.log.info(
                         f"Vung '{loc}': tim thay {len(candidates)} khach san "
-                        f"(da dat gioi han hien tai ~25 khach san/vung cua Booking.com)"
+                        "(da het khach san co the tim thay qua cac to hop loc/sap xep hien co)"
                     )
                 else:
                     Actor.log.info(f"Vung '{loc}': tim thay {len(candidates)} khach san")

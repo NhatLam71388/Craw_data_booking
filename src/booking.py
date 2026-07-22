@@ -10,10 +10,16 @@ Cach hoat dong (da reverse-engineer, khac han Agoda vi Booking.com co AWS WAF JS
      Neu goi kem checkin/checkout/group_adults/no_rooms, MOI ket qua co san
      `priceDisplayInfoIrene` (gia that cho ky nghi) -> day la nguon gia CHINH (xem
      _extract_result_price), khong phai tu trang chi tiet khach san.
-     GIOI HAN DA BIET: trang chi tra ve toi da ~25 khach san/lan tai (nbResultsPerPage=25);
+     GIOI HAN DA BIET: 1 lan GET chi tra ve toi da ~25 khach san/trang (nbResultsPerPage=25);
      co the co hang nghin ket qua (nbResultsTotal) nhung co che phan trang that (client-side
-     GraphQL, offset trong query variables) chua reverse-engineer duoc - tam thoi CHI lay
-     duoc trang dau (toi da 25 khach san moi vung/tu khoa).
+     GraphQL, offset trong query variables) VAN CHUA reverse-engineer duoc (offset/page/start
+     tren URL deu bi lo qua). Thay vao do, search() vuot qua gioi han 25 bang cach goi NHIEU
+     lan voi cac to hop tham so loc "nflt=class=<1..5>" (hang sao) + sap xep "order=" (price/
+     bayesian_review_score/distance_from_search/popularity) - da xac nhan CA HAI deu duoc
+     Booking.com ap dung server-side (nbResultsTotal va danh sach khach san thay doi that theo
+     tung gia tri), nen moi to hop tra ve 1 "trang" ~25 khach san chu yeu KHAC nhau. Gom + loai
+     trung theo hotel_id qua nhieu to hop cho toi khi du so luong yeu cau (xem _search_combos,
+     _STAR_FILTERS, _SORT_ORDERS).
   3. Chi tiet 1 khach san: GET /hotel/<country>/<slug>.html -> cung ky thuat tach Apollo
      cache -> BasicPropertyData, PropertyReview, RoomData, RatingScore (category_scores
      nam o ROOT_QUERY.reviewsFrontend(...).ratingScores[]), starRating (o
@@ -86,8 +92,17 @@ CDN_BASE = "https://cf.bstatic.com"
 _CHALLENGE_MARKER = "awsWafCookieDomainList"
 # Tran an toan: so khach san toi da lay moi vung/tu khoa khi max_items=0 (khong gioi han).
 _SEARCH_SAFETY_CAP = 200
-# Booking.com hien chi xac nhan tra ve toi da 1 trang ket qua (~25) - xem docstring module.
-_SEARCH_PAGE_SIZE = 25
+
+# Booking.com KHONG ho tro offset/trang that (da xac nhan: moi tham so URL "offset=",
+# "page=", "start=",... deu bi lo qua, luon tra ve cung 1 trang dau). Tuy nhien tham so
+# loc "nflt=" (hang sao, vd "class=3") VA tham so sap xep "order=" (vd "price",
+# "bayesian_review_score", "distance_from_search", "popularity") deu duoc ap dung
+# SERVER-SIDE (da xac nhan qua test: nbResultsTotal va danh sach id thay doi that theo
+# tung gia tri) - moi to hop (loc, sap xep) tra ve 1 "trang" ~25 khach san RIENG, hau het
+# khac nhau. search() dung ky thuat nay de gom nhieu hon 25 khach san/vung ma KHONG can
+# phan trang GraphQL that (van chua reverse-engineer duoc - xem docstring dau file).
+_STAR_FILTERS: list[str | None] = [None, "class=1", "class=2", "class=3", "class=4", "class=5"]
+_SORT_ORDERS: list[str | None] = [None, "price", "bayesian_review_score", "distance_from_search", "popularity"]
 
 _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -239,19 +254,24 @@ class BookingClient:
         no_rooms de moi ket qua co san gia that (`price`/`currency`/`check_in`/`check_out`
         trong dict tra ve) - day la nguon gia CHINH cua actor nay (xem docstring dau file).
 
-        CHI lay duoc trang dau (toi da _SEARCH_PAGE_SIZE khach san) - xem gioi han
-        o docstring dau file. max_items > _SEARCH_PAGE_SIZE se bi cat bot kem canh bao.
+        1 lan goi HTML chi tra ve toi da ~25 khach san/trang (offset/trang that
+        van CHUA reverse-engineer duoc - xem docstring dau file). De vuot qua ~25, ham nay
+        goi NHIEU lan voi cac to hop (loc hang sao "nflt=class=N", sap xep "order=") khac
+        nhau - moi to hop la 1 "trang" ~25 khach san RIENG do server loc/sap xep khac nhau
+        (da xac nhan qua test, xem _STAR_FILTERS/_SORT_ORDERS) - gom lai va loai trung theo
+        hotel_id cho toi khi du max_items hoac het to hop de thu. max_items=0 -> dung o
+        _SEARCH_SAFETY_CAP (tran an toan).
         """
         # Chuan hoa Unicode ve NFC: URL copy tu trinh duyet thuong ma hoa tieng Viet
         # o dang to hop (vd "o" + dau mu + dau huyen roi rac, 2+ ma diem) thay vi 1 ky
         # tu duy nhat da ghep san. Da xac nhan Booking.com xu ly dang to hop KEM ON DINH
         # HON (hay tra ve bien the trang thieu ket qua) - normalize truoc khi goi.
         term = unicodedata.normalize("NFC", term)
-        params: dict[str, Any] = {"ss": term, "lang": self.language, "selected_currency": self.currency}
+        base_params: dict[str, Any] = {"ss": term, "lang": self.language, "selected_currency": self.currency}
         nights = 0
         if search_criteria:
             nights = _nights_between(search_criteria["check_in"], search_criteria["check_out"])
-            params.update(
+            base_params.update(
                 {
                     "checkin": search_criteria["check_in"],
                     "checkout": search_criteria["check_out"],
@@ -261,11 +281,76 @@ class BookingClient:
                 }
             )
 
-        # Booking.com thinh thoang tra ve 1 bien the trang KHONG co khoi ket qua tim
-        # kiem (page nhe hon, khong ro nguyen nhan - co the do A/B test/load balancing;
-        # da quan sat thay ca 2 lan lien tiep deu truot) - thu lai toi da 3 lan, cach nhau
-        # 1 chut, truoc khi bao loi. Khac voi truong hop tim kiem hop le nhung khong co
-        # khach san nao (van tra ve list rong, khong retry).
+        target = max_items if max_items > 0 else _SEARCH_SAFETY_CAP
+
+        combos = _search_combos()
+        combined: list[dict[str, Any]] = []
+        seen_ids: set[Any] = set()
+        last_exc: Exception | None = None
+        got_any_page = False
+        stale_combos = 0  # so to hop lien tiep khong them duoc khach san moi nao
+
+        for combo_index, (star_filter, order) in enumerate(combos):
+            if len(combined) >= target:
+                break
+            # Vung/tu khoa nho (it khach san that su) se nhanh chong het hang de mo rong -
+            # dung som sau nhieu to hop lien tiep khong ra khach san moi, tranh goi thua.
+            # Nguong du cao de khong dung nham khi 1 vai to hop trung lap ngau nhien (vd
+            # hang sao qua it khach san) - can that su het hang tren PHAN LON to hop.
+            if stale_combos >= 10:
+                break
+            params = dict(base_params)
+            if star_filter:
+                params["nflt"] = star_filter
+            if order:
+                params["order"] = order
+
+            try:
+                page_results = await self._fetch_search_page(params, term, search_criteria, nights)
+            except BookingError as exc:
+                last_exc = exc
+                # To hop dau tien (khong loc/sap xep) that bai la loi that su (trang tim
+                # kiem khong dung duoc) - cac to hop sau chi la mo rong, bo qua neu loi.
+                if combo_index == 0:
+                    raise
+                continue
+
+            got_any_page = True
+            added = 0
+            for item in page_results:
+                if item["hotel_id"] in seen_ids:
+                    continue
+                seen_ids.add(item["hotel_id"])
+                combined.append(item)
+                added += 1
+                if len(combined) >= target:
+                    break
+            stale_combos = 0 if added else stale_combos + 1
+
+            if combo_index < len(combos) - 1 and len(combined) < target:
+                await asyncio.sleep(1.0)
+
+        if not got_any_page:
+            raise last_exc or BookingError(f"Tim kiem that bai cho '{term}' sau nhieu lan thu")
+
+        return combined[:target]
+
+    async def _fetch_search_page(
+        self,
+        params: dict[str, Any],
+        term: str,
+        search_criteria: dict[str, Any] | None,
+        nights: int,
+    ) -> list[dict[str, Any]]:
+        """Goi 1 lan trang tim kiem voi params cho san (co the kem nflt/order) -> danh
+        sach ket qua tho (khong cat theo max_items - do search() tu gom/cat).
+
+        Booking.com thinh thoang tra ve 1 bien the trang KHONG co khoi ket qua tim kiem
+        (page nhe hon, khong ro nguyen nhan - co the do A/B test/load balancing; da quan
+        sat thay ca 2 lan lien tiep deu truot) - thu lai toi da 3 lan, cach nhau 1 chut,
+        truoc khi bao loi. Khac voi truong hop tim kiem hop le nhung khong co khach san
+        nao (van tra ve list rong, khong retry).
+        """
         last_exc: Exception | None = None
         for attempt in range(3):
             if attempt > 0:
@@ -288,9 +373,7 @@ class BookingClient:
                 )
                 continue
 
-            results = _extract_search_results(cache, search_criteria, nights)
-            limit = min(max_items, _SEARCH_PAGE_SIZE) if max_items > 0 else _SEARCH_PAGE_SIZE
-            return results[:limit]
+            return _extract_search_results(cache, search_criteria, nights)
 
         raise last_exc or BookingError(f"Tim kiem that bai cho '{term}' sau nhieu lan thu")
 
@@ -499,6 +582,20 @@ def _extract_result_price(item: dict[str, Any], nights: int) -> tuple[float | No
     if not total:
         return None, None
     return round(total / nights, 2), currency
+
+
+def _search_combos() -> list[tuple[str | None, str | None]]:
+    """Danh sach (nflt hang sao, order sap xep) can thu de mo rong ket qua tim kiem qua
+    ~25 - xem _STAR_FILTERS/_SORT_ORDERS va docstring search(). (None, None) - tuc trang
+    mac dinh khong loc/sap xep - LUON dung dau tien de giu hanh vi/gia tri cu."""
+    combos: list[tuple[str | None, str | None]] = []
+    for order in _SORT_ORDERS:
+        for star_filter in _STAR_FILTERS:
+            combo = (star_filter, order)
+            if combo == (None, None):
+                continue
+            combos.append(combo)
+    return [(None, None), *combos]
 
 
 def _has_search_results_key(cache: dict[str, Any]) -> bool:

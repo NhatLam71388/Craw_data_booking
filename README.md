@@ -59,12 +59,20 @@ base image `apify/actor-python-playwright` (đã có sẵn Playwright + trình d
 
 ### Giới hạn đã biết (v1) — xem chi tiết trong `src/booking.py`
 
-- **Tìm theo vùng chỉ lấy được ~25 khách sạn/vùng** (trang đầu). Booking.com có hàng nghìn kết
-  quả mỗi thành phố lớn nhưng phân trang thật chạy qua 1 lời gọi GraphQL phía client (biến
-  `pagination.offset`) mà actor **chưa reverse-engineer được** cách kích hoạt đúng — thử `offset=`
-  trên URL không có tác dụng (trang luôn server-render trang đầu). Nếu bạn cần nhiều hơn 25
-  khách sạn/vùng, dùng nhiều từ khóa `locations` cụ thể hơn (theo quận/khu vực nhỏ) thay vì 1
-  thành phố lớn.
+- **1 lần tải trang tìm kiếm chỉ trả về ~25 khách sạn**. Booking.com có hàng nghìn kết quả mỗi
+  thành phố lớn nhưng phân trang thật chạy qua 1 lời gọi GraphQL phía client (biến
+  `pagination.offset`) mà actor **chưa reverse-engineer được** cách kích hoạt đúng — thử
+  `offset=`/`page=`/`start=` trên URL đều không có tác dụng (trang luôn server-render trang
+  đầu). Actor **lách qua giới hạn này** bằng cách tự gọi nhiều lần với các tổ hợp tham số lọc
+  hạng sao (`nflt=class=1..5`) + sắp xếp (`order=price/bayesian_review_score/
+  distance_from_search/popularity`) — đã xác nhận Booking.com áp dụng CẢ HAI server-side (tổng
+  số kết quả và danh sách khách sạn thay đổi thật theo từng giá trị), nên mỗi tổ hợp trả về 1
+  "trang" ~25 khách sạn chủ yếu khác nhau; actor gộp + loại trùng theo `hotel_id` cho tới khi đủ
+  `maxItemsPerLocation` (mặc định 50, có thể đặt tới 200+, xem input). Lưu ý: mỗi ~25 khách sạn
+  cần 1 request HTTP riêng, nên `maxItemsPerLocation` lớn sẽ tốn nhiều thời gian/request hơn;
+  với vùng có ít khách sạn thật (vd < 25), actor tự dừng sớm khi các tổ hợp không còn khách sạn
+  mới. Nếu vẫn cần nhiều hơn (vd > 200/vùng), có thể kết hợp thêm nhiều từ khóa `locations` cụ
+  thể hơn (theo quận/khu vực nhỏ).
 - **Giá chỉ có khi có `checkIn`** (ngày nhận phòng) — dù qua `searchTerms`/`locations`
   (tự động có, đi qua bước tìm kiếm) hay `propertyUrls`/`hotelIds` (cần URL có sẵn
   `checkin`/`checkout` hoặc bạn cấp `checkIn` ở input). Không có ngày → `price`/`currency`/
@@ -98,8 +106,8 @@ base image `apify/actor-python-playwright` (đã có sẵn Playwright + trình d
 | `searchTerms` | array (string) | Tên khách sạn cụ thể (vd `"The Chum Boutique Hue"`). |
 | `propertyUrls` | array (string) | URL trang khách sạn Booking.com. Không đi qua bước tìm kiếm, nhưng vẫn **có giá** (kể cả `rooms[].price_per_night`) nếu URL có sẵn `checkin`/`checkout` hoặc bạn cấp `checkIn` ở input (xem "Giới hạn đã biết" — nguồn giá fallback riêng cho trường hợp này). |
 | `hotelIds` | array (string) | Dạng `<mã quốc gia>/<slug>` (vd `vn/the-chum-boutique`) — **không phải ID số đơn thuần** (xem giới hạn ở trên). Giá hoạt động giống `propertyUrls` (cần `checkIn`). |
-| `locations` | array (string) | Tên vùng/thành phố (vd `"Hue"`) hoặc link trang search Booking.com (vd `https://www.booking.com/searchresults.html?ss=Hue&checkin=2026-08-01&checkout=2026-08-03`). Giới hạn ~25 khách sạn/vùng. Nếu link có `checkin`/`checkout`/`group_adults`/`no_rooms`, mọi khách sạn tìm được sẽ có **giá thực tế**. |
-| `maxItemsPerLocation` | integer | Số khách sạn tối đa lấy cho mỗi vùng (thực tế bị chặn ở ~25 do giới hạn phân trang). Mặc định `50`. |
+| `locations` | array (string) | Tên vùng/thành phố (vd `"Hue"`) hoặc link trang search Booking.com (vd `https://www.booking.com/searchresults.html?ss=Hue&checkin=2026-08-01&checkout=2026-08-03`). Nếu link có `checkin`/`checkout`/`group_adults`/`no_rooms`, mọi khách sạn tìm được sẽ có **giá thực tế**. |
+| `maxItemsPerLocation` | integer | Số khách sạn tối đa lấy cho mỗi vùng (vd `200`) — actor tự gọi nhiều lần với các tổ hợp lọc/sắp xếp khác nhau để gom đủ số lượng (xem "Giới hạn đã biết"). Mặc định `50`. |
 | `checkIn` | string | Ngày check-in mặc định (`YYYY-MM-DD`) cho `searchTerms`/`locations` không có sẵn ngày từ URL — **cho ra giá thực tế**. Không ảnh hưởng `propertyUrls`/`hotelIds` (xem giới hạn ở trên). |
 | `lengthOfStay` | integer | Số đêm ở lại, dùng cùng `checkIn`. Mặc định `1`. |
 | `adults` / `rooms` | integer | Số người lớn / số phòng, dùng cùng `checkIn`. Mặc định `2` / `1`. |
@@ -121,12 +129,12 @@ base image `apify/actor-python-playwright` (đã có sẵn Playwright + trình d
 }
 ```
 
-### Ví dụ input — tìm theo vùng (tối đa ~25 khách sạn)
+### Ví dụ input — tìm theo vùng (vd 200 khách sạn)
 
 ```json
 {
   "locations": ["Hue"],
-  "maxItemsPerLocation": 25,
+  "maxItemsPerLocation": 200,
   "language": "vi",
   "currency": "VND"
 }
