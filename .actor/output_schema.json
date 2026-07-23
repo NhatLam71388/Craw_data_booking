@@ -1,0 +1,12 @@
+{
+    "actorOutputSchemaVersion": 1,
+    "title": "Booking.com Hotel Scraper output",
+    "description": "Danh sach khach san Booking.com da crawl duoc, kem gia, review, tien nghi.",
+    "properties": {
+        "hotels": {
+            "title": "Danh sach khach san",
+            "type": "string",
+            "template": "{{links.apiDefaultDatasetUrl}}/items"
+        }
+    }
+}

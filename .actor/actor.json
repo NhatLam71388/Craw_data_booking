@@ -5,6 +5,7 @@
     "description": "Trich xuat du lieu khach san Booking.com: gia, review, phong, tien nghi qua GraphQL cache nhung san trong trang.",
     "version": "0.0",
     "input": "./input_schema.json",
+    "output": "./output_schema.json",
     "dockerfile": "../Dockerfile",
     "storages": {
         "dataset": "./dataset_schema.json"

@@ -1,97 +1,107 @@
 {
     "title": "Booking.com Hotel Scraper Input",
-    "description": "Nhap tu khoa tim kiem, URL khach san, hoac ten vung/thanh pho de trich xuat du lieu Booking.com.",
+    "description": "Nhập từ khóa tìm kiếm, URL khách sạn, hoặc tên vùng/thành phố để trích xuất dữ liệu Booking.com.",
     "type": "object",
     "schemaVersion": 1,
     "properties": {
         "searchTerms": {
-            "title": "Tu khoa tim kiem",
+            "title": "Từ khóa tìm kiếm",
             "type": "array",
-            "description": "Ten khach san hoac diem den. Hieu qua nhat voi ten cu the (vd: 'The Chum Boutique Hue').",
+            "description": "Tên khách sạn hoặc điểm đến. Hiệu quả nhất với tên cụ thể (vd: 'The Chum Boutique Hue').",
             "editor": "stringList",
             "prefill": ["The Chum Boutique Hue"]
         },
         "propertyUrls": {
-            "title": "URL khach san",
+            "title": "URL khách sạn",
             "type": "array",
-            "description": "URL trang khach san Booking.com (vd: https://www.booking.com/hotel/vn/the-chum-boutique.html). Neu URL co san checkin/checkout/group_adults/no_rooms, actor tu lay GIA THUC TE cho khach san do.",
+            "description": "URL trang khách sạn Booking.com (vd: https://www.booking.com/hotel/vn/the-chum-boutique.html). Nếu URL có sẵn checkin/checkout/group_adults/no_rooms, actor tự lấy GIÁ THỰC TẾ cho khách sạn đó.",
             "editor": "stringList"
         },
         "hotelIds": {
             "title": "Hotel IDs",
             "type": "array",
-            "description": "ID khach san Booking.com dang so neu da biet (vd: 10214414). Dung khi ban da co san ID.",
+            "description": "ID khách sạn Booking.com dạng số nếu đã biết (vd: 10214414). Dùng khi bạn đã có sẵn ID.",
             "editor": "stringList"
         },
         "locations": {
-            "title": "Vung / thanh pho can tim",
+            "title": "Vùng / thành phố cần tìm",
             "type": "array",
-            "description": "Ten vung/thanh pho (vd: 'Hue') HOAC dan link trang tim kiem Booking.com (vd: https://www.booking.com/searchresults.html?ss=Hue). Actor tu tim tat ca khach san trong vung do, gioi han boi maxItemsPerLocation. Moi lan tai (~25 khach san) can 1 request rieng, nen so vung x maxItemsPerLocation lon se ton nhieu thoi gian/request hon.",
+            "description": "Tên vùng/thành phố (vd: 'Huế') HOẶC dán link trang tìm kiếm Booking.com (vd: https://www.booking.com/searchresults.html?ss=Hue). Actor tự tìm tất cả khách sạn trong vùng đó, giới hạn bởi maxItemsPerLocation. Mỗi lần tải (~25 khách sạn) cần 1 request riêng, nên số vùng x maxItemsPerLocation lớn sẽ tốn nhiều thời gian/request hơn.",
             "editor": "stringList",
             "prefill": ["Hue"]
         },
         "maxItemsPerLocation": {
-            "title": "So khach san toi da moi vung",
+            "title": "Số khách sạn tối đa mỗi vùng",
             "type": "integer",
-            "description": "So khach san toi da lay cho MOI vung trong 'locations' (vd 200). Actor tu goi nhieu lan voi cac to hop loc hang sao/sap xep khac nhau de gom du so luong nay (moi ~25 khach san can 1 request). 0 = khong gioi han (dung o tran an toan 200). Mac dinh 50.",
+            "description": "Số khách sạn tối đa lấy cho MỖI vùng trong 'Vùng / thành phố cần tìm' (vd 200). Actor tự gọi nhiều lần với các tổ hợp lọc hạng sao/sắp xếp khác nhau để gom đủ số lượng này (mỗi ~25 khách sạn cần 1 request). 0 = không giới hạn (dừng ở trần an toàn 200). Mặc định 50.",
             "default": 50,
             "minimum": 0
         },
         "checkIn": {
-            "title": "Ngay check-in (mac dinh)",
+            "title": "Ngày check-in",
             "type": "string",
-            "description": "Dinh dang YYYY-MM-DD. Dung de lay GIA THUC TE cho cac khach san KHONG co san checkin tu URL rieng. Bo trong = khong lay gia (nhanh hon).",
-            "editor": "textfield"
+            "description": "Chọn ngày nhận phòng. Dùng để lấy GIÁ THỰC TẾ cho các khách sạn KHÔNG có sẵn checkin từ URL riêng. Bỏ trống = không lấy giá (nhanh hơn).",
+            "editor": "datepicker",
+            "dateType": "absolute",
+            "pattern": "^(\\d{4})-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])$"
+        },
+        "checkOut": {
+            "title": "Ngày check-out",
+            "type": "string",
+            "description": "Chọn ngày trả phòng. Nếu để trống, actor sẽ tự tính bằng Ngày check-in + Số đêm ở dưới. Chỉ áp dụng cho các khách sạn KHÔNG có sẵn checkin/checkout từ URL riêng.",
+            "editor": "datepicker",
+            "dateType": "absolute",
+            "pattern": "^(\\d{4})-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])$"
         },
         "lengthOfStay": {
-            "title": "So dem (mac dinh)",
+            "title": "Số đêm (khi không chọn ngày check-out)",
             "type": "integer",
-            "description": "So dem o lai, dung cung voi checkIn o tren. Mac dinh 1.",
+            "description": "Số đêm ở lại, dùng để tính ngày check-out khi bạn không chọn 'Ngày check-out' ở trên. Mặc định 1.",
             "default": 1,
             "minimum": 1,
             "maximum": 30
         },
         "adults": {
-            "title": "So nguoi lon (mac dinh)",
+            "title": "Số người lớn",
             "type": "integer",
-            "description": "Dung cung voi checkIn o tren cho cac khach san khong co san thong tin nay tu URL.",
+            "description": "Dùng cùng với Ngày check-in ở trên cho các khách sạn không có sẵn thông tin này từ URL.",
             "default": 2,
             "minimum": 1
         },
         "rooms": {
-            "title": "So phong (mac dinh)",
+            "title": "Số phòng",
             "type": "integer",
-            "description": "Dung cung voi checkIn o tren cho cac khach san khong co san thong tin nay tu URL.",
+            "description": "Dùng cùng với Ngày check-in ở trên cho các khách sạn không có sẵn thông tin này từ URL.",
             "default": 1,
             "minimum": 1
         },
         "currency": {
-            "title": "Tien te",
+            "title": "Tiền tệ",
             "type": "string",
-            "description": "Ma tien te hien thi gia (vd: USD, VND, EUR). Mac dinh USD.",
+            "description": "Mã tiền tệ hiển thị giá (vd: USD, VND, EUR). Mặc định USD.",
             "default": "USD",
             "editor": "textfield"
         },
         "language": {
-            "title": "Ngon ngu ket qua",
+            "title": "Ngôn ngữ kết quả",
             "type": "string",
-            "description": "Ngon ngu du lieu tra ve (ten phong, tien nghi, mo ta, review...).",
+            "description": "Ngôn ngữ dữ liệu trả về (tên phòng, tiện nghi, mô tả, review...).",
             "editor": "select",
             "default": "en-us",
             "enum": ["en-us", "vi", "th", "ko", "ja", "zh-cn", "id"],
-            "enumTitles": ["English", "Tieng Viet", "ไทย", "한국어", "日本語", "中文", "Bahasa Indonesia"]
+            "enumTitles": ["English", "Tiếng Việt", "ไทย", "한국어", "日本語", "中文", "Bahasa Indonesia"]
         },
         "maxItems": {
-            "title": "Gioi han so ban ghi",
+            "title": "Giới hạn số bản ghi",
             "type": "integer",
-            "description": "So ban ghi khach san toi da tren tat ca nguon. 0 = khong gioi han. Dung de kiem soat chi phi.",
+            "description": "Số bản ghi khách sạn tối đa trên tất cả nguồn. 0 = không giới hạn. Dùng để kiểm soát chi phí.",
             "default": 0,
             "minimum": 0
         },
         "requestDelay": {
-            "title": "Do tre giua request (giay)",
+            "title": "Độ trễ giữa request (giây)",
             "type": "integer",
-            "description": "So giay cho giua cac lan goi khach san lien tiep. Tang len voi batch lon de giam nguy co bi chan.",
+            "description": "Số giây chờ giữa các lần gọi khách sạn liên tiếp. Tăng lên với batch lớn để giảm nguy cơ bị chặn.",
             "default": 2,
             "minimum": 0,
             "maximum": 30
@@ -99,7 +109,7 @@
         "proxyConfiguration": {
             "title": "Proxy",
             "type": "object",
-            "description": "Cau hinh proxy. Nen dung Apify Residential proxy cho quy mo lon.",
+            "description": "Cấu hình proxy. Nên dùng Apify Residential proxy cho quy mô lớn.",
             "editor": "proxy",
             "default": {
                 "useApifyProxy": true,

@@ -165,14 +165,24 @@ def _build_global_criteria(actor_input: dict[str, Any]) -> dict[str, Any] | None
     check_in = actor_input.get("checkIn")
     if not check_in:
         return None
-    length_of_stay = int(actor_input.get("lengthOfStay") or 1)
     try:
-        check_out = (datetime.strptime(check_in, "%Y-%m-%d") + timedelta(days=max(length_of_stay, 1))).strftime(
-            "%Y-%m-%d"
-        )
+        datetime.strptime(check_in, "%Y-%m-%d")
     except ValueError:
         Actor.log.warning(f"checkIn khong dung dinh dang YYYY-MM-DD: '{check_in}', bo qua.")
         return None
+
+    check_out = actor_input.get("checkOut")
+    if check_out:
+        try:
+            datetime.strptime(check_out, "%Y-%m-%d")
+        except ValueError:
+            Actor.log.warning(f"checkOut khong dung dinh dang YYYY-MM-DD: '{check_out}', bo qua.")
+            return None
+    else:
+        length_of_stay = int(actor_input.get("lengthOfStay") or 1)
+        check_out = (datetime.strptime(check_in, "%Y-%m-%d") + timedelta(days=max(length_of_stay, 1))).strftime(
+            "%Y-%m-%d"
+        )
     return {
         "check_in": check_in,
         "check_out": check_out,
