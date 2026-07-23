@@ -108,8 +108,9 @@ base image `apify/actor-python-playwright` (đã có sẵn Playwright + trình d
 | `hotelIds` | array (string) | Dạng `<mã quốc gia>/<slug>` (vd `vn/the-chum-boutique`) — **không phải ID số đơn thuần** (xem giới hạn ở trên). Giá hoạt động giống `propertyUrls` (cần `checkIn`). |
 | `locations` | array (string) | Tên vùng/thành phố (vd `"Hue"`) hoặc link trang search Booking.com (vd `https://www.booking.com/searchresults.html?ss=Hue&checkin=2026-08-01&checkout=2026-08-03`). Nếu link có `checkin`/`checkout`/`group_adults`/`no_rooms`, mọi khách sạn tìm được sẽ có **giá thực tế**. |
 | `maxItemsPerLocation` | integer | Số khách sạn tối đa lấy cho mỗi vùng (vd `200`) — actor tự gọi nhiều lần với các tổ hợp lọc/sắp xếp khác nhau để gom đủ số lượng (xem "Giới hạn đã biết"). Mặc định `50`. |
-| `checkIn` | string | Ngày check-in mặc định (`YYYY-MM-DD`) cho `searchTerms`/`locations` không có sẵn ngày từ URL — **cho ra giá thực tế**. Không ảnh hưởng `propertyUrls`/`hotelIds` (xem giới hạn ở trên). |
-| `lengthOfStay` | integer | Số đêm ở lại, dùng cùng `checkIn`. Mặc định `1`. |
+| `checkIn` | string | Ngày check-in mặc định (`YYYY-MM-DD`, chọn qua date-picker trên Console) cho `searchTerms`/`locations` không có sẵn ngày từ URL — **cho ra giá thực tế**. Không ảnh hưởng `propertyUrls`/`hotelIds` (xem giới hạn ở trên). |
+| `checkOut` | string | Ngày check-out (`YYYY-MM-DD`, date-picker). Nếu bỏ trống, tự tính từ `checkIn` + `lengthOfStay`. |
+| `lengthOfStay` | integer | Số đêm ở lại — chỉ dùng khi **không** cấp `checkOut`. Mặc định `1`. |
 | `adults` / `rooms` | integer | Số người lớn / số phòng, dùng cùng `checkIn`. Mặc định `2` / `1`. |
 | `currency` | string | Mã tiền tệ hiển thị (vd `USD`, `VND`). Mặc định `USD`. |
 | `language` | string | Ngôn ngữ kết quả: `en-us` (mặc định), `vi`, `th`, `ko`, `ja`, `zh-cn`, `id`. |
@@ -146,13 +147,16 @@ base image `apify/actor-python-playwright` (đã có sẵn Playwright + trình d
 {
   "locations": ["Ho Chi Minh City"],
   "checkIn": "2026-08-01",
-  "lengthOfStay": 2,
+  "checkOut": "2026-08-03",
   "adults": 2,
   "rooms": 1,
   "language": "vi",
   "currency": "VND"
 }
 ```
+
+> Không chọn `checkOut`? Actor tự tính bằng `checkIn` + `lengthOfStay` (mặc định `1` đêm) như
+> trước đây.
 
 ---
 
